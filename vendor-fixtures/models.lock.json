@@ -1,0 +1,34 @@
+[
+  {
+    "vendor": "Texas Instruments",
+    "url": "https://www.ti.com/lit/zip/sprm552",
+    "archivePath": "sprm552c.ibs",
+    "archiveSha256": "f99cb588a07b2d77d4c52a3189933c8175467d8829b94d118173943b286990aa",
+    "sha256": "23011a68eb8ff35562615b5b108edcb9f017c5e61f4f68e32f35c5fb88f163be",
+    "file": "sprm552c.ibs"
+  },
+  {
+    "vendor": "Winbond",
+    "url": "https://www.winbond.com/resource-files/w631gg6mb_ibis.zip",
+    "archivePath": "W631GG6MB-12.ibs",
+    "archiveSha256": "7d58de6c5cfaef3cff5f8f157c1b73f1e55b876a0f0659c194b764add50851e7",
+    "sha256": "f2c0f36e24be68fd95a05f34ca4ab875ac5145f1956c5696e9a60b0d8a03e859",
+    "file": "W631GG6MB-12.ibs"
+  },
+  {
+    "vendor": "Texas Instruments",
+    "url": "https://www.ti.com/lit/zip/sllm183",
+    "archivePath": "SN65HVD72_IBIS/sn65hvd72.ibs",
+    "archiveSha256": "935ce893dc388969a3e1319153daaa81e1486d786b87eed6a7d543b5f5dbfcba",
+    "sha256": "293f71f8d6c8764914a73564ebbb5b9e0e706d9dcc18d87aae91f1def06ca47e",
+    "file": "sn65hvd72.ibs"
+  },
+  {
+    "vendor": "Texas Instruments",
+    "url": "https://www.ti.com/lit/zip/scem216c",
+    "archivePath": "SN74LVC1G04_IBIS/sn74lvc1g04.ibs",
+    "archiveSha256": "8092b150c132800895d01cf1e416bd3dd510bb29dd68d93c01ed41e226d8acb8",
+    "sha256": "03033638d7fe8bf268428be133a5aad63aae0145980113561b20ab92063e2c00",
+    "file": "sn74lvc1g04.ibs"
+  }
+]

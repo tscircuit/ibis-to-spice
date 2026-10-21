@@ -1,0 +1,43 @@
+{
+  "name": "@tscircuit/ibis-to-spice",
+  "version": "0.0.2",
+  "description": "Deterministic table-based IBIS to ngspice conversion",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup lib/index.ts lib/cli.ts --format esm --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "fixtures:fetch": "bun scripts/fetch-vendor-fixtures.ts",
+    "prove": "bun scripts/prove-vendor-models.ts",
+    "check": "bun run fixtures:fetch && bun run typecheck && bun test && bun run build && bun run prove",
+    "repeatability:check": "bun run fixtures:fetch && bun scripts/check-repeatability.ts"
+  },
+  "dependencies": {
+    "fflate": "0.8.2",
+    "@noble/hashes": "1.8.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "@tscircuit/ngspice-spice-engine": "0.0.20",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "circuit-json": "0.0.529"
+  },
+  "license": "MIT",
+  "bin": {
+    "ibis-to-spice": "dist/cli.js"
+  }
+}
