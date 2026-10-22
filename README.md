@@ -2,15 +2,36 @@
 
 Deterministic IBIS electrical-table conversion to ngspice behavioral subcircuits. This source package lives in the normal tscircuit example's workspace; no LLM runs during conversion or simulation. The typed TSX adapter, extraction pipeline and examples are documented by the repository's root README.
 
-From the repository root:
+From this repository:
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm --filter @tscircuit/ibis-to-spice fixtures:fetch
-pnpm --filter @tscircuit/ibis-to-spice typecheck
-pnpm --filter @tscircuit/ibis-to-spice test
-pnpm --filter @tscircuit/ibis-to-spice build
+npm install
+npm run fixtures:fetch
+npm run typecheck
+npm test
+npm run test:package
 ```
+
+Git snapshots include the generated Node ESM API, CLI and bundled declarations
+in `dist`. This makes nested Git installs usable before any lifecycle scripts
+run: Bun can start a parent's `prepare` concurrently with its dependencies,
+and bundling declarations from inside `node_modules` leaves relative imports.
+The converter therefore needs no install-time `prepare` hook or dependency mutation.
+
+`prepack` builds the same artifacts from source before `npm pack`/publication.
+If development dependencies are absent, it installs the pinned build tools
+locally with lifecycle scripts disabled. Packed artifacts need no build tools.
+Declarations are bundled without relative imports for strict NodeNext consumers.
+After changing source, run `npm run build` and commit `dist` with the source.
+`npm run test:package` rebuilds a clean source copy and compares every generated
+file with the committed distribution before exercising a packed consumer.
+
+For consumers that should not rebuild, pin the prepared archive at
+`https://api.github.com/repos/tscircuit/ibis-to-spice/tarball/<full-sha>`.
+It contains the committed distribution and installs without lifecycle scripts.
+Git/codeload pins contain the same artifacts, but some package managers choose
+to run `prepack` for Git sources and require build approval. Source packing uses
+Node/npm; Bun is needed only for development tests and vendor scripts.
 
 The tests download original TI AM335x, TI SN65HVD72 RS485, TI SN74LVC1G04 CMOS and Winbond W631GG6MB files. Both archive and extracted-file hashes are pinned in `vendor-fixtures/models.lock.json`. Copyrighted vendor model files remain under ignored `.cache/vendors` and are not redistributed.
 

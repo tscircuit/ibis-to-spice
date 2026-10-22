@@ -12,7 +12,9 @@
     }
   },
   "files": [
+    "cli.mjs",
     "dist",
+    "scripts/prepack.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -20,10 +22,12 @@
     "build": "tsup lib/index.ts lib/cli.ts --format esm --dts --clean",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:package": "node scripts/test-package.mjs",
     "fixtures:fetch": "bun scripts/fetch-vendor-fixtures.ts",
     "prove": "bun scripts/prove-vendor-models.ts",
     "check": "bun run fixtures:fetch && bun run typecheck && bun test && bun run build && bun run prove",
-    "repeatability:check": "bun run fixtures:fetch && bun scripts/check-repeatability.ts"
+    "repeatability:check": "bun run fixtures:fetch && bun scripts/check-repeatability.ts",
+    "prepack": "node scripts/prepack.mjs"
   },
   "dependencies": {
     "fflate": "0.8.2",
@@ -38,6 +42,6 @@
   },
   "license": "MIT",
   "bin": {
-    "ibis-to-spice": "dist/cli.js"
+    "ibis-to-spice": "cli.mjs"
   }
 }

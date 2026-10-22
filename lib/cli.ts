@@ -5,10 +5,15 @@ import { resolveIbisModel } from "./load"
 import type { IbisModelConfig } from "./types"
 
 // Local paths belong to the CLI; the reusable API/TSX accepts text or HTTP(S).
+const usage = "Usage: ibis-to-spice config.json output.cir"
 try {
   const [configPath, outputPath] = process.argv.slice(2)
+  if (configPath === "--help" || configPath === "-h") {
+    console.log(usage)
+    process.exit(0)
+  }
   if (!configPath || !outputPath)
-    throw new Error("Usage: ibis-to-spice config.json output.cir")
+    throw new Error(usage)
   const { inputFile, ...config } = JSON.parse(
     await readFile(configPath, "utf8"),
   ) as IbisModelConfig & { inputFile?: string }
