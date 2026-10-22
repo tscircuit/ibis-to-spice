@@ -14,20 +14,20 @@
   "files": [
     "cli.mjs",
     "dist",
-    "scripts/prepare.mjs",
+    "scripts/prepack.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsup lib/index.ts lib/cli.ts --format esm --dts --clean",
-    "prepare": "node scripts/prepare.mjs",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:package": "node scripts/test-package.mjs",
     "fixtures:fetch": "bun scripts/fetch-vendor-fixtures.ts",
     "prove": "bun scripts/prove-vendor-models.ts",
     "check": "bun run fixtures:fetch && bun run typecheck && bun test && bun run build && bun run prove",
-    "repeatability:check": "bun run fixtures:fetch && bun scripts/check-repeatability.ts"
+    "repeatability:check": "bun run fixtures:fetch && bun scripts/check-repeatability.ts",
+    "prepack": "node scripts/prepack.mjs"
   },
   "dependencies": {
     "fflate": "0.8.2",

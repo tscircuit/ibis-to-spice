@@ -12,29 +12,24 @@ npm test
 npm run test:package
 ```
 
-`prepare` builds the Node ESM API, CLI and bundled declarations during source
-installation and before `npm pack`/publication. Packed npm artifacts need no
-install scripts or build tools. The declarations are bundled without relative
-imports, so strict NodeNext consumers need no declaration rewriting.
-When a Git installer such as Bun omits development dependencies, preparation
-installs the pinned build tools locally with lifecycle scripts disabled before
-building. Packed artifacts already contain the distribution and skip that work.
+Git snapshots include the generated Node ESM API, CLI and bundled declarations
+in `dist`. This makes nested Git installs usable before any lifecycle scripts
+run: Bun can start a parent's `prepare` concurrently with its dependencies,
+and bundling declarations from inside `node_modules` leaves relative imports.
+The converter therefore has no install-time build or dependency mutation.
 
-For pnpm 11 source dependencies, pin `github:tscircuit/ibis-to-spice#<full-sha>`
-or `https://codeload.github.com/tscircuit/ibis-to-spice/tar.gz/<full-sha>`, and
-approve preparation in the consuming project's `pnpm-workspace.yaml`:
+`prepack` builds the same artifacts from source before `npm pack`/publication.
+If development dependencies are absent, it installs the pinned build tools
+locally with lifecycle scripts disabled. Packed artifacts need no build tools.
+Declarations are bundled without relative imports for strict NodeNext consumers.
+After changing source, run `npm run build` and commit `dist` with the source.
+`npm run test:package` rebuilds a clean source copy and compares every generated
+file with the committed distribution before exercising a packed consumer.
 
-```yaml
-allowBuilds:
-  '@tscircuit/ibis-to-spice@git+https://github.com/tscircuit/ibis-to-spice.git': true
-```
-
-Use pnpm 11.19 or newer for that repository approval to cover codeload tarballs.
-The GitHub API `/repos/.../tarball/...` URL is treated as an ordinary tarball by
-pnpm 11.25 and does **not** run `prepare`; use the Git/codeload pin or an npm-packed
-artifact instead. Source preparation uses npm and Node; Bun is needed only for
-the development tests and vendor scripts. There is intentionally no Bun lockfile:
-pnpm otherwise selects Bun to install a Git dependency's build tools.
+Pin `github:tscircuit/ibis-to-spice#<full-sha>` or its codeload tarball in
+consumers. Both contain the prepared artifacts; converter build approval is
+unnecessary. Source packing uses Node/npm; Bun is needed only for development
+tests and vendor scripts.
 
 The tests download original TI AM335x, TI SN65HVD72 RS485, TI SN74LVC1G04 CMOS and Winbond W631GG6MB files. Both archive and extracted-file hashes are pinned in `vendor-fixtures/models.lock.json`. Copyrighted vendor model files remain under ignored `.cache/vendors` and are not redistributed.
 

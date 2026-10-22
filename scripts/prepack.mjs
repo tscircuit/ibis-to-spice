@@ -14,8 +14,8 @@ if (!existsSync(join(root, "lib/index.ts"))) {
   try {
     for (const dependency of ["tsup", "typescript", "@types/bun/package.json"]) require.resolve(dependency)
   } catch {
-    // Bun Git dependencies reach prepare before their dev dependencies exist.
-    // Suppress lifecycles to avoid recursively invoking this same preparation.
+    // Source packing may start without development dependencies.
+    // Suppress lifecycles while installing the pinned build tools.
     run(["install", "--include=dev", "--ignore-scripts", "--package-lock=false", "--no-audit", "--no-fund"])
   }
   run(["run", "build"])

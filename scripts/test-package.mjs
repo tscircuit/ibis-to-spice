@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -17,6 +17,12 @@ try {
   run("npm", ["install", "--omit=dev", "--ignore-scripts", "--package-lock=false"], source)
   assert(!existsSync(join(source, "dist")))
   run("npm", ["pack", "--pack-destination", temporary], source)
+
+  // Git snapshots must carry exactly the artifacts produced from clean source.
+  const generated = readdirSync(join(source, "dist")).sort()
+  assert.deepEqual(readdirSync(join(root, "dist")).sort(), generated)
+  for (const name of generated)
+    assert.deepEqual(readFileSync(join(source, "dist", name)), readFileSync(join(root, "dist", name)), `Stale dist/${name}; rebuild and commit it`)
 
   const consumer = join(temporary, "consumer")
   mkdirSync(consumer)
