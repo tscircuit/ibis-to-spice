@@ -13,12 +13,13 @@
   },
   "files": [
     "dist",
+    "scripts/prepare.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsup lib/index.ts lib/cli.ts --format esm --dts --clean",
-    "prepare": "npm run build",
+    "prepare": "node scripts/prepare.mjs",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:package": "node scripts/test-package.mjs",

@@ -16,6 +16,9 @@ npm run test:package
 installation and before `npm pack`/publication. Packed npm artifacts need no
 install scripts or build tools. The declarations are bundled without relative
 imports, so strict NodeNext consumers need no declaration rewriting.
+When a Git installer such as Bun omits development dependencies, preparation
+installs the pinned build tools locally with lifecycle scripts disabled before
+building. Packed artifacts already contain the distribution and skip that work.
 
 For pnpm 11 source dependencies, pin `github:tscircuit/ibis-to-spice#<full-sha>`
 or `https://codeload.github.com/tscircuit/ibis-to-spice/tar.gz/<full-sha>`, and
