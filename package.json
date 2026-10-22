@@ -12,6 +12,7 @@
     }
   },
   "files": [
+    "cli.mjs",
     "dist",
     "scripts/prepare.mjs",
     "README.md",
@@ -41,6 +42,6 @@
   },
   "license": "MIT",
   "bin": {
-    "ibis-to-spice": "dist/cli.js"
+    "ibis-to-spice": "cli.mjs"
   }
 }

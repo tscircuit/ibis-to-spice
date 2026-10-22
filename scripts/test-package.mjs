@@ -12,7 +12,7 @@ try {
   // Start with source only: packing must create every runtime/type entry itself.
   const source = join(temporary, "source")
   mkdirSync(source)
-  for (const name of ["lib", "scripts", "package.json", "tsconfig.json", "README.md", "LICENSE"])
+  for (const name of ["lib", "scripts", "cli.mjs", "package.json", "tsconfig.json", "README.md", "LICENSE"])
     cpSync(join(root, name), join(source, name), { recursive: true })
   run("npm", ["install", "--omit=dev", "--ignore-scripts", "--package-lock=false"], source)
   assert(!existsSync(join(source, "dist")))
