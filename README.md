@@ -2,15 +2,36 @@
 
 Deterministic IBIS electrical-table conversion to ngspice behavioral subcircuits. This source package lives in the normal tscircuit example's workspace; no LLM runs during conversion or simulation. The typed TSX adapter, extraction pipeline and examples are documented by the repository's root README.
 
-From the repository root:
+From this repository:
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm --filter @tscircuit/ibis-to-spice fixtures:fetch
-pnpm --filter @tscircuit/ibis-to-spice typecheck
-pnpm --filter @tscircuit/ibis-to-spice test
-pnpm --filter @tscircuit/ibis-to-spice build
+npm install
+npm run fixtures:fetch
+npm run typecheck
+npm test
+npm run test:package
 ```
+
+`prepare` builds the Node ESM API, CLI and bundled declarations during source
+installation and before `npm pack`/publication. Packed npm artifacts need no
+install scripts or build tools. The declarations are bundled without relative
+imports, so strict NodeNext consumers need no declaration rewriting.
+
+For pnpm 11 source dependencies, pin `github:tscircuit/ibis-to-spice#<full-sha>`
+or `https://codeload.github.com/tscircuit/ibis-to-spice/tar.gz/<full-sha>`, and
+approve preparation in the consuming project's `pnpm-workspace.yaml`:
+
+```yaml
+allowBuilds:
+  '@tscircuit/ibis-to-spice@git+https://github.com/tscircuit/ibis-to-spice.git': true
+```
+
+Use pnpm 11.19 or newer for that repository approval to cover codeload tarballs.
+The GitHub API `/repos/.../tarball/...` URL is treated as an ordinary tarball by
+pnpm 11.25 and does **not** run `prepare`; use the Git/codeload pin or an npm-packed
+artifact instead. Source preparation uses npm and Node; Bun is needed only for
+the development tests and vendor scripts. There is intentionally no Bun lockfile:
+pnpm otherwise selects Bun to install a Git dependency's build tools.
 
 The tests download original TI AM335x, TI SN65HVD72 RS485, TI SN74LVC1G04 CMOS and Winbond W631GG6MB files. Both archive and extracted-file hashes are pinned in `vendor-fixtures/models.lock.json`. Copyrighted vendor model files remain under ignored `.cache/vendors` and are not redistributed.
 

@@ -18,8 +18,10 @@
   ],
   "scripts": {
     "build": "tsup lib/index.ts lib/cli.ts --format esm --dts --clean",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:package": "node scripts/test-package.mjs",
     "fixtures:fetch": "bun scripts/fetch-vendor-fixtures.ts",
     "prove": "bun scripts/prove-vendor-models.ts",
     "check": "bun run fixtures:fetch && bun run typecheck && bun test && bun run build && bun run prove",
