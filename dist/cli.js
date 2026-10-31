@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   resolveIbisModel
-} from "./chunk-5WGMOTLW.js";
+} from "./chunk-ZQPGYR2Y.js";
 
 // lib/cli.ts
 import { readFile, writeFile } from "fs/promises";

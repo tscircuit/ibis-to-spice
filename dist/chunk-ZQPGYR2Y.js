@@ -27,7 +27,9 @@ function ibisNumber(token) {
     f: 1e-15
   };
   const suffix = match[2];
-  if (!/^[TGMkmunpf]?(?:V|A|Ohm|ohm|F|H|s)?$/.test(suffix))
+  if (!/^(?:[TGMkmunpf](?:[VvAaFfHhSs]|(?:Ohm|ohm|OHM)[sS]?)?|(?:[VvAaFHsS]|(?:Ohm|ohm|OHM)[sS]?))?$/.test(
+    suffix
+  ))
     throw new IbisError(
       "invalid_number",
       `Unsupported IBIS numeric suffix: ${token}`
@@ -191,8 +193,8 @@ function parseBuffer(name, text) {
         resistance,
         fixtureVoltage: [
           fixture,
-          ibisNumber(fields.v_fixture_min?.[0] ?? String(fixture)),
-          ibisNumber(fields.v_fixture_max?.[0] ?? String(fixture))
+          ibisNumber(fields.v_fixture_min?.[0] ?? "NA") ?? fixture,
+          ibisNumber(fields.v_fixture_max?.[0] ?? "NA") ?? fixture
         ],
         data: table(section)
       };
