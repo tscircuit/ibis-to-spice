@@ -180,7 +180,7 @@ export function convertIbisModelToSpice(input: string | Uint8Array, definition: 
       return { physicalPin, port, role: signalPorts.has(port) ? "signal" as const : "reference" as const, resistanceOhms: value("resistance"), inductanceHenries: value("inductance"), capacitanceFarads: value("capacitance") }
     }),
   }
-  const metadata: IbisConversionMetadata = { converterVersion: CONVERTER_VERSION, sourceSha256: hash, packagePolicy: definition.packagePolicy, tableExtrapolation: "hold-endpoint-current", omissions, packageData, differentialPins: component.differentialPins, pins }
+  const metadata: IbisConversionMetadata = { converterVersion: CONVERTER_VERSION, sourceSha256: hash, packagePolicy: definition.packagePolicy, tableExtrapolation: "hold-endpoint-current", switchingWeightPolicy: "bounded-least-squares", omissions, packageData, differentialPins: component.differentialPins, pins }
   const name = `IBIS_${sourceHash(JSON.stringify([metadata, schedules, duration])).slice(0, 20)}`
   if (rails.some((rail) => signalPorts.has(rail))) throw new IbisError("invalid_reference", "A signal port cannot also serve as a buffer reference rail")
   const mapping: Record<string, string> = Object.fromEntries(signals.map(([, port], i) => [`PAD${i}`, port]))

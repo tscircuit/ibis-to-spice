@@ -18,7 +18,7 @@ import {
   spiceNumber,
   switchingWeights,
   validateIbisDefinitionSource
-} from "./chunk-5WGMOTLW.js";
+} from "./chunk-PA575KHC.js";
 
 // lib/general.ts
 function ibisTimeSeconds(value, allowZero = false) {
@@ -185,7 +185,7 @@ function convertIbisModelToSpice(input, definition, run) {
       return { physicalPin, port, role: signalPorts.has(port) ? "signal" : "reference", resistanceOhms: value("resistance"), inductanceHenries: value("inductance"), capacitanceFarads: value("capacitance") };
     })
   };
-  const metadata = { converterVersion: CONVERTER_VERSION, sourceSha256: hash, packagePolicy: definition.packagePolicy, tableExtrapolation: "hold-endpoint-current", omissions, packageData, differentialPins: component.differentialPins, pins };
+  const metadata = { converterVersion: CONVERTER_VERSION, sourceSha256: hash, packagePolicy: definition.packagePolicy, tableExtrapolation: "hold-endpoint-current", switchingWeightPolicy: "bounded-least-squares", omissions, packageData, differentialPins: component.differentialPins, pins };
   const name = `IBIS_${sourceHash(JSON.stringify([metadata, schedules, duration])).slice(0, 20)}`;
   if (rails.some((rail) => signalPorts.has(rail))) throw new IbisError("invalid_reference", "A signal port cannot also serve as a buffer reference rail");
   const mapping = Object.fromEntries(signals.map(([, port], i) => [`PAD${i}`, port]));
