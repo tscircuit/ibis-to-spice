@@ -179,7 +179,33 @@ export function switchingWeights(
         "nonfinite_conversion",
         `${buffer.name}: invalid switching weights`,
       )
-    return [t, ku, kd]
+    if (ku >= 0 && ku <= 1 && kd >= 0 && kd <= 1) return [t, ku, kd]
+    // Inconsistent V/T and I/V data can require negative conductance in the
+    // exact 2EQ/2UK solve. Minimize the same KCL residual within [0, 1]^2;
+    // the convex quadratic's constrained minimum lies on one of four edges.
+    // See docs/switching-weights.md for the IBIS method and policy limits.
+    const clamp = (value: number) => Math.max(0, Math.min(1, value))
+    const pu = currents.map((current) => current.pu)
+    const pd = currents.map((current) => current.pd)
+    const dot = (x: number[], y: number[]) =>
+      x.reduce((sum, value, j) => sum + value * y[j], 0)
+    const candidates: Array<[number, number]> = []
+    for (const fixed of [0, 1]) {
+      candidates.push([
+        fixed,
+        clamp(dot(pd, rhs.map((r, j) => r - fixed * pu[j])) / dot(pd, pd)),
+      ])
+      candidates.push([
+        clamp(dot(pu, rhs.map((r, j) => r - fixed * pd[j])) / dot(pu, pu)),
+        fixed,
+      ])
+    }
+    const error = ([u, d]: [number, number]) =>
+      rhs.reduce((sum, r, j) => sum + (pu[j] * u + pd[j] * d - r) ** 2, 0)
+    const [u, d] = candidates.reduce((best, next) =>
+      error(next) < error(best) ? next : best,
+    )
+    return [t, u, d]
   })
 }
 

@@ -448,7 +448,27 @@ function switchingWeights(buffer, corner, edge) {
         "nonfinite_conversion",
         `${buffer.name}: invalid switching weights`
       );
-    return [t, ku, kd];
+    if (ku >= 0 && ku <= 1 && kd >= 0 && kd <= 1) return [t, ku, kd];
+    const clamp = (value) => Math.max(0, Math.min(1, value));
+    const pu = currents.map((current) => current.pu);
+    const pd = currents.map((current) => current.pd);
+    const dot = (x, y) => x.reduce((sum, value, j) => sum + value * y[j], 0);
+    const candidates = [];
+    for (const fixed of [0, 1]) {
+      candidates.push([
+        fixed,
+        clamp(dot(pd, rhs.map((r, j) => r - fixed * pu[j])) / dot(pd, pd))
+      ]);
+      candidates.push([
+        clamp(dot(pu, rhs.map((r, j) => r - fixed * pd[j])) / dot(pu, pu)),
+        fixed
+      ]);
+    }
+    const error = ([u2, d2]) => rhs.reduce((sum, r, j) => sum + (pu[j] * u2 + pd[j] * d2 - r) ** 2, 0);
+    const [u, d] = candidates.reduce(
+      (best, next) => error(next) < error(best) ? next : best
+    );
+    return [t, u, d];
   });
 }
 function convertIbisBuffer(document, model, options) {

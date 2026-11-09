@@ -173,6 +173,7 @@ interface IbisRunConfig {
 }
 interface IbisConversionMetadata {
     tableExtrapolation: "hold-endpoint-current";
+    switchingWeightPolicy: "bounded-least-squares";
     converterVersion: string;
     sourceSha256: string;
     packagePolicy: "vendor" | "omit";
