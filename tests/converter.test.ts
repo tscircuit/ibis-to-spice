@@ -113,12 +113,71 @@ describe("original manufacturer IBIS files", () => {
   })
   test("unit parsing preserves prefixes and integer magnitudes", () => {
     expect(ibisNumber("1.5pF")).toBe(1.5e-12)
+    expect(ibisNumber("1.5pf")).toBe(1.5e-12)
+    expect(ibisNumber("50Ohms")).toBe(50)
+    expect(ibisNumber("50ohms")).toBe(50)
+    expect(ibisNumber("1f")).toBe(1e-15)
+    expect(ibisNumber("1F")).toBe(1)
     expect(ibisNumber("100M")).toBe(1e8)
     expect(spiceNumber(1e11)).toBe("100000000000")
     expect(seconds("5ns")).toBe(5e-9)
     expect(() => seconds("5")).toThrow()
     expect(() => ibisNumber("oops")).toThrow()
     expect(() => ibisNumber("5garbage")).toThrow("suffix")
+  })
+  test("waveform V_fixture_min and V_fixture_max with explicit NA fall back to V_fixture", () => {
+    const file = parseIbis(`[IBIS Ver] 4.2
+[Model] OUT_NA_FIXTURE
+Model_type Output
+C_comp 1p 1p 1p
+[Voltage Range] 3.3 3.0 3.6
+[Pulldown]
+0 0 0 0
+3.3 0.033 0.030 0.036
+[Pullup]
+0 0 0 0
+3.3 -0.033 -0.030 -0.036
+[Rising Waveform]
+R_fixture = 50Ohms
+V_fixture = 0V
+V_fixture_min = NA
+V_fixture_max = NA
+0s 0 0 0
+1ns 1.65 1.5 1.8
+[Rising Waveform]
+R_fixture = 50Ohms
+V_fixture = 3.3V
+V_fixture_min = NA
+V_fixture_max = NA
+0s 1.65 1.5 1.8
+1ns 3.3 3.0 3.6
+[Falling Waveform]
+R_fixture = 50Ohms
+V_fixture = 0V
+V_fixture_min = NA
+V_fixture_max = NA
+0s 1.65 1.5 1.8
+1ns 0 0 0
+[Falling Waveform]
+R_fixture = 50Ohms
+V_fixture = 3.3V
+V_fixture_min = NA
+V_fixture_max = NA
+0s 3.3 3.0 3.6
+1ns 1.65 1.5 1.8
+[End]`)
+    for (const corner of ["typical", "minimum", "maximum"] as const) {
+      const converted = convertIbisBuffer(file, "OUT_NA_FIXTURE", {
+        mode: "output",
+        corner,
+      })
+      expect(
+        converted.weights!.rising.every((row) => row.every(Number.isFinite)),
+      ).toBe(true)
+      expect(
+        converted.weights!.falling.every((row) => row.every(Number.isFinite)),
+      ).toBe(true)
+    }
   })
   test("package columns use their declared order rather than guessed units", () => {
     const file = parseIbis(`[IBIS Ver] 4.2
