@@ -290,6 +290,11 @@ export function clockWeights(
       "unsupported_stimulus",
       "Only explicit clock stimuli are supported in this release",
     )
+  if (stimulus.inverted !== undefined && typeof stimulus.inverted !== "boolean")
+    throw new IbisError(
+      "invalid_stimulus",
+      "Clock inverted flag must be a boolean",
+    )
   if (!converted.weights)
     throw new IbisError(
       "missing_weights",
