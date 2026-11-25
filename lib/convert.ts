@@ -311,7 +311,7 @@ export function clockWeights(
   )
     throw new IbisError(
       "overlapping_edges",
-      "Clock edge interval is shorter than the IBIS switching waveform",
+      "Clock edge interval cannot contain the full IBIS switching waveform; use convertIbisModelToSpice for settled-tail or abutting edges",
     )
   const samples: Array<[number, number, number]> = []
   for (let i = 0; i < intervals; i++) {
@@ -439,7 +439,7 @@ export function convertIbisComponentToSpice(
       if (component.coupledPackage)
         throw new IbisError(
           "unsupported_package",
-          `${component.name}: coupled package model requires explicit packageModel="none" in this release`,
+          `${component.name}: use convertIbisModelToSpice with packagePolicy="vendor" for coupled packages, or explicitly select packageModel="none" here`,
         )
       const corner = config.corner ?? "typical"
       const resistance =

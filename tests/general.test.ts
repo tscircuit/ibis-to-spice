@@ -47,19 +47,13 @@ test("physical-pin mapping, vendor type/polarity/enable and differential metadat
   expect(legacyTi.components.am335x_zcz.differentialPins.find((pair) => pair.pin === "P1")?.delay).toEqual([null, null, null])
 })
 
-test("ambiguous rails and unsupported package/control features fail explicitly", () => {
+test("ambiguous rails and unsupported control features fail explicitly", () => {
   const base = lvcDefinition(), run = { duration: "500ns", pinStates: { Y: { mode: "output" as const, enabled: true } }, stimuli: { Y: bits("01") } }
   expect(() => convertIbisModelToSpice(lvcSource(), { ...base, pinMap: { "4": "Y", "3": "GND" } }, run)).toThrow("explicit pullup")
   expect(() => convertIbisModelToSpice(lvcSource(), base, { ...run, stimuli: {} })).toThrow("explicit bit")
   expect(() => convertIbisModelToSpice(lvcSource(), base, { ...run, pinStates: { Y: { mode: "input" } } })).toThrow("output-only")
   expect(() => convertIbisModelToSpice(lvcSource(), base, { ...run, pinStates: { Y: { mode: "output", enabled: false } }, stimuli: {} })).toThrow("no drive-enable")
-  expect(() => convertIbisModelToSpice(lvcSource(), { ...base, packagePolicy: "vendor" }, run)).toThrow("nonzero vendor reference/supply-pin")
-  const hvd = hvdDefinition()
-  expect(() => convertIbisModelToSpice(hvd.source.content!, { ...hvd, packagePolicy: "vendor" }, { duration: "12us", pinStates: { A: { mode: "input" }, B: { mode: "input" } }, stimuli: {} })).toThrow("nonzero vendor reference/supply-pin")
-  const wb = vendorSource("W631GG6MB-12.ibs")
-  expect(() => convertIbisModelToSpice(wb, { source: { content: wb }, component: "W631GG6MB-12", pinMap: { F3: "DQS", A1: "VDD", B1: "GND" }, modelSelections: { F3: "ODT_60" }, corner: "typical", packagePolicy: "vendor" }, { duration: "12ns", pinStates: { DQS: { mode: "input" } }, stimuli: {} })).toThrow("nonzero vendor reference/supply-pin")
-  expect(() => convertIbisModelToSpice(vendorSource("sprm552c.ibs"), { source: { content: vendorSource("sprm552c.ibs") }, component: "am335x_zcz", pinMap: { P1: "DQS", E5: "VDD", A1: "GND" }, modelSelections: { P1: "Model_655" }, corner: "typical", packagePolicy: "vendor" }, { duration: "40ns", pinStates: { DQS: { mode: "output", enabled: true } }, stimuli: { DQS: bits("01", { unitInterval: "2.5ns", startTime: "0ns" }) } })).toThrow("Coupled")
-}, 30_000)
+})
 
 test("declared separate rail references survive serialization and remain independent", () => {
   const text = `[IBIS Ver] 4.2\n[Component] C\n[Pin] signal_name model_name\n1 D IN\n2 VDD POWER\n3 VSS GND\n4 PC POWER\n5 GC GND\n[Pin Mapping] pulldown_ref pullup_ref gnd_clamp_ref power_clamp_ref ext_ref\n1 G P CG CP NC\n2 NC P NC NC NC\n3 G NC NC NC NC\n4 NC NC NC CP NC\n5 NC NC CG NC NC\n[Model] IN\nModel_type Input\nC_comp 1p 1p 1p\n[Voltage Range] 3.3 3 3.6\n[Power Clamp Reference] 1.8 1.8 1.8\n[Gnd Clamp Reference] 0.5 0.5 0.5\n[Power Clamp]\n-10 -0.1 -0.1 -0.1\n10 0.1 0.1 0.1\n[Gnd Clamp]\n-10 -0.2 -0.2 -0.2\n10 0.2 0.2 0.2\n[End]`

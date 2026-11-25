@@ -1,3 +1,101 @@
+type Matrix = number[][];
+/** IBIS section 7 lumped package data; matrix order is exactly [Pin Numbers]. */
+interface PackageModel {
+    name: string;
+    manufacturer: string;
+    oem: string;
+    description: string;
+    pins: string[];
+    /** Ohms in [Pin Numbers] order. */
+    R: Matrix;
+    /** Henries in [Pin Numbers] order. */
+    L: Matrix;
+    /** Farads in [Pin Numbers] order. */
+    C: Matrix;
+    mergedPins?: Record<string, string>;
+}
+
+/** Original diagonal terms for the mapped physical pins. */
+interface PackageSelfTerms {
+    R: number[];
+    L: number[];
+    C: number[];
+}
+/** Evidence for conversion from vendor pair magnitudes to Maxwell capacitance. */
+interface CapacitanceSignCorrection {
+    packageModel: PackageModel["name"];
+    negatedEntries: number;
+}
+/** Reduced package matrices and the original data needed to explain their construction. */
+interface ReducedPackageMatrices extends Pick<PackageModel, "R" | "L" | "C"> {
+    activePins: PackageModel["pins"];
+    unusedPins: PackageModel["pins"];
+    selfTerms: PackageSelfTerms;
+    capacitanceSignCorrection?: CapacitanceSignCorrection;
+}
+/**
+ * Use principal R/L matrices for zero series current at unused pins.
+ * Use a Schur complement for zero incremental charge at unused pins.
+ * External loads, switching and resonant circulating currents on unused pins are neglected.
+ */
+declare function reducePackageMatrices({ model, pins, }: {
+    model: PackageModel;
+    pins: PackageModel["pins"];
+}): ReducedPackageMatrices;
+
+/** Selected package matrices and aliases for physical pins sharing a package bus. */
+interface CoupledPackageModel extends ReducedPackageMatrices {
+    mergedPins: Record<string, string>;
+}
+/** Format the source evidence for an IBIS capacitance sign conversion. */
+declare function formatCapacitanceSignWarnings({ selected, file, sourceSha256, }: {
+    selected: ReducedPackageMatrices | undefined;
+    file: string;
+    sourceSha256: string;
+}): string[];
+/** IBIS [Pin Numbers]: unlisted pins use scalar data unless their rail bus is merged. */
+declare function resolveCoupledPackage({ document, component, pins, }: {
+    document: IbisDocument;
+    component: IbisComponent;
+    pins: ReducedPackageMatrices["activePins"];
+}): CoupledPackageModel | undefined;
+/** Stamp a passive lumped pi model; currents and mutual R/L face board to die. */
+declare function buildCoupledPackageSpiceElements({ matrices, terminals, die, ground, boardGround, }: {
+    matrices: Pick<ReducedPackageMatrices, "R" | "L" | "C">;
+    terminals: string[];
+    die: string[];
+    ground: string;
+    boardGround?: string;
+}): string[];
+
+/** Time in seconds and measured pullup and pulldown coefficients. */
+type SwitchingCoefficientSamples = Array<[
+    seconds: number,
+    pullup: number,
+    pulldown: number
+]>;
+/** Measured transition direction in an IBIS waveform. */
+type WaveformEdge = IbisBuffer["waveforms"][number]["kind"];
+/** Evidence for fixture voltage settlement over the discarded portion of an edge. */
+interface SwitchingFixture {
+    resistanceOhms: number;
+    fixtureVoltageVolts: number;
+    toleranceVolts: number;
+    maxDeviationVolts: number;
+}
+/** Evidence for truncating a settled waveform tail. */
+interface WaveformTailTruncation {
+    physicalPin: string;
+    model: string;
+    edge: WaveformEdge;
+    originalDurationSeconds: number;
+    cutoffTimeSeconds: number;
+    coefficientTolerance: number;
+    maxCoefficientDeviation: number;
+    maxCoefficientHoldError: number;
+    fixtures: SwitchingFixture[];
+}
+
 type IbisCorner = "typical" | "minimum" | "maximum";
 type IbisRange<T = number> = [
     typical: T | null,
@@ -85,6 +183,10 @@ interface IbisDocument {
     selectors: Record<string, string[]>;
     modelNames: string[];
     getBuffer(name: string): IbisBuffer;
+    getPackageModel?(name: string): PackageModel;
+}
+interface ParsedIbisDocument extends IbisDocument {
+    getPackageModel(name: string): PackageModel;
 }
 /** Clock values are seconds when numeric; strings use explicit time units. */
 interface IbisClock {
@@ -205,6 +307,10 @@ interface IbisConversionMetadata {
     omissions: string[];
     packageData: {
         coupledModel?: string;
+        matrices?: CoupledPackageModel;
+        /** Aliased board ports must be bound to the same net as their canonical port. */
+        boardPortAliases?: Record<string, string>;
+        unusedPinPolicy?: "open-series-floating-capacitance";
         mappedPins: Array<{
             physicalPin: string;
             port: string;
@@ -214,6 +320,7 @@ interface IbisConversionMetadata {
             capacitanceFarads: number | null;
         }>;
     };
+    switchingTails?: WaveformTailTruncation[];
     differentialPins: IbisComponent["differentialPins"];
     pins: Array<{
         physicalPin: string;
@@ -242,7 +349,7 @@ declare class IbisError extends Error {
 declare function ibisNumber(token: string): number | null;
 declare function cornerValue(values: IbisRange | undefined, corner: "typical" | "minimum" | "maximum", field: string): number;
 /** Parse metadata once, then parse only selected buffers; large vendor files stay usable. */
-declare function parseIbis(text: string): IbisDocument;
+declare function parseIbis(text: string): ParsedIbisDocument;
 
 declare const CONVERTER_VERSION = "0.0.2";
 declare const sourceHash: (source: string | Uint8Array) => string;
@@ -305,7 +412,7 @@ declare function loadIbisDefinitionSource(source: IbisSource, options?: {
 }): Promise<string>;
 
 /** The TSX API uses milliseconds; legacy converter APIs continue to use seconds. */
-declare function ibisTimeSeconds(value: IbisTimeInput, allowZero?: boolean): number;
+declare function ibisTimeSeconds(time: IbisTimeInput, allowZero?: boolean): number;
 interface LogicalTransition {
     time: number;
     state: 0 | 1;
@@ -317,11 +424,27 @@ interface LogicalSchedule {
     sha256: string;
 }
 /** Expand explicit bits once. Polarity maps logic to pad state separately from caller inversion. */
-declare function logicalBitSchedule(stimulus: IbisBitsStimulus, durationInput: IbisTimeInput, polarity?: "inverting" | "non-inverting"): LogicalSchedule;
+declare function logicalBitSchedule(stimulus: IbisBitsStimulus, ...[durationInput, polarity]: [
+    durationInput: IbisTimeInput,
+    polarity?: "inverting" | "non-inverting"
+]): LogicalSchedule;
+
 /** Reuse measured switching weights only at actual transitions; identical bits do not retrigger. */
-declare function bitWeights(converted: ConvertedBuffer, schedule: LogicalSchedule): Array<[number, number, number]>;
+declare function bitWeights(converted: ConvertedBuffer, schedule: LogicalSchedule): SwitchingCoefficientSamples;
+interface IbisModelConversionOptions {
+    /** Original asset label for source diagnostics if different from the resolved file. */
+    sourceLabel?: string;
+}
+interface IbisModelConversionRequest extends IbisModelConversionOptions {
+    definition: IbisModelDefinition;
+    run: IbisRunConfig;
+}
 /** Assemble reusable electrical definitions and one explicit run without protocol assumptions. */
-declare function convertIbisModelToSpice(input: string | Uint8Array, definition: IbisModelDefinition, run: IbisRunConfig): ConvertedGeneralIbisComponent;
+declare function convertIbisModelToSpice(input: string | Uint8Array, ...args: [request: IbisModelConversionRequest] | [
+    definition: IbisModelDefinition,
+    run: IbisRunConfig,
+    options?: IbisModelConversionOptions
+]): ConvertedGeneralIbisComponent;
 
 declare const IBIS_REFERENCE_ERROR_CODES: {
     readonly ambiguous: "ambiguous_reference";
@@ -351,4 +474,4 @@ declare function resolveIbisReferences({ component, pin, pinToSourcePort, explic
     };
 }): ResolvedIbisReferencePorts;
 
-export { CONVERTER_VERSION, type ConvertedBuffer, type ConvertedGeneralIbisComponent, type ConvertedIbisComponent, IBIS_REFERENCE_ERROR_CODES, type IbisBitsStimulus, type IbisBuffer, type IbisClock, type IbisComponent, type IbisConversionMetadata, type IbisCorner, type IbisDocument, IbisError, type IbisFetch, type IbisModelConfig, type IbisModelDefinition, type IbisPackagePin, type IbisPinBinding, type IbisPinRunState, type IbisRamp, type IbisRampRatio, type IbisRange, IbisReferenceError, type IbisReferencePorts, type IbisReferenceVoltages, type IbisRunConfig, type IbisSource, type IbisTable, type IbisTimeInput, type IbisWaveform, type LogicalSchedule, type LogicalTransition, type ResolvedIbisReferencePorts, bitWeights, bufferTables, clockWeights, convertIbisBuffer, convertIbisComponentToSpice, convertIbisModelToSpice, cornerValue, createIbisModelResolver, ibisNumber, ibisTimeSeconds, interpolate, loadIbisDefinitionSource, loadIbisSource, logicalBitSchedule, parseIbis, resolveIbisModel, resolveIbisReferenceVoltages, resolveIbisReferences, seconds, sourceHash, spiceNumber, switchingWeights };
+export { CONVERTER_VERSION, type ConvertedBuffer, type ConvertedGeneralIbisComponent, type ConvertedIbisComponent, type CoupledPackageModel, IBIS_REFERENCE_ERROR_CODES, type IbisBitsStimulus, type IbisBuffer, type IbisClock, type IbisComponent, type IbisConversionMetadata, type IbisCorner, type IbisDocument, IbisError, type IbisFetch, type IbisModelConfig, type IbisModelConversionOptions, type IbisModelConversionRequest, type IbisModelDefinition, type IbisPackagePin, type IbisPinBinding, type IbisPinRunState, type IbisRamp, type IbisRampRatio, type IbisRange, IbisReferenceError, type IbisReferencePorts, type IbisReferenceVoltages, type IbisRunConfig, type IbisSource, type IbisTable, type IbisTimeInput, type IbisWaveform, type LogicalSchedule, type LogicalTransition, type PackageModel, type ParsedIbisDocument, type ResolvedIbisReferencePorts, type WaveformTailTruncation, bitWeights, bufferTables, buildCoupledPackageSpiceElements, clockWeights, convertIbisBuffer, convertIbisComponentToSpice, convertIbisModelToSpice, cornerValue, createIbisModelResolver, formatCapacitanceSignWarnings, ibisNumber, ibisTimeSeconds, interpolate, loadIbisDefinitionSource, loadIbisSource, logicalBitSchedule, parseIbis, reducePackageMatrices, resolveCoupledPackage, resolveIbisModel, resolveIbisReferenceVoltages, resolveIbisReferences, seconds, sourceHash, spiceNumber, switchingWeights };
