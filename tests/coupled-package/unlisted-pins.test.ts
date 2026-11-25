@@ -52,8 +52,9 @@ A1
   assert.match(unlisted.source, /LPKGU2 \S+ \S+ 7e-9\n/)
   assert.match(unlisted.source, /RPKGU3 REF1 \S+ 99\n/)
   assert.match(unlisted.source, /LPKGU3 \S+ \S+ 9\.9e-8\n/)
-  assert.match(unlisted.source, /CPKGU2 REF0 REF1 7e-12/)
-  assert.doesNotMatch(unlisted.source, /^CPKGU3 |^VDIE/m)
+  assert.match(unlisted.source, /^CPKGU2a REF0 REF1 3\.5e-12$/m)
+  assert.match(unlisted.source, /^CPKGU2b PKGUL2 PKGUL3 3\.5e-12$/m)
+  assert.doesNotMatch(unlisted.source, /^CPKGU3|^VDIE/m)
   assert.match(unlisted.source, /^XBUF0 PKGD0 PKGUL2 PKGUL3 /m)
   const packageElements = unlisted.source
     .split("\n")

@@ -546,6 +546,7 @@ function buildPackageNetwork({
             name,
             matrixIndex,
             index,
+            role: terms.role,
             terms: {
               resistanceOhms: coupled.R[matrixIndex][matrixIndex],
               inductanceHenries: coupled.L[matrixIndex][matrixIndex],
@@ -556,6 +557,7 @@ function buildPackageNetwork({
           name,
           matrixIndex,
           index,
+          role: terms.role,
           terms: requireScalarPackageTerms(terms)
         };
       }
@@ -570,7 +572,7 @@ function buildPackageNetwork({
       sharedDieNode = `PKGD${first.matrixIndex}`;
     else if (branches.length > 1) sharedDieNode = `PKGB${first.index}`;
     let dieNode = sharedDieNode || boardSpiceNode;
-    for (const { name, terms, matrixIndex, index } of branches) {
+    for (const { name, terms, matrixIndex, index, role } of branches) {
       if (matrixIndex >= 0) {
         matrixBranches.set(name, {
           boardSpiceNode,
@@ -592,7 +594,8 @@ function buildPackageNetwork({
         shunts.push({
           index,
           port,
-          node: boardSpiceNode,
+          boardNode: boardSpiceNode,
+          dieNode: role === "reference" && (terms.resistanceOhms > 0 || terms.inductanceHenries > 0) ? dieNode : void 0,
           farads: terms.capacitanceFarads
         });
     }
@@ -600,14 +603,26 @@ function buildPackageNetwork({
   }
   const groundPorts = resolvePackageGroundPorts(pins);
   const prefix = coupled ? "CPKGU" : "CPKG";
-  for (const { index, port, node, farads } of shunts) {
-    const ground = resolveCapacitanceGround(
-      [...groundPorts.get(port) || []].map((port2) => boardNodes.get(port2))
+  for (const { index, port, boardNode, dieNode, farads } of shunts) {
+    const grounds = [...groundPorts.get(port) || []];
+    const boardGround = resolveCapacitanceGround(
+      grounds.map((port2) => boardNodes.get(port2))
     );
-    if (node !== ground)
-      elements.push(
-        `${prefix}${index} ${node} ${ground} ${spiceNumber(farads)}`
-      );
+    if (dieNode === void 0) {
+      if (boardNode !== boardGround)
+        elements.push(
+          `${prefix}${index} ${boardNode} ${boardGround} ${spiceNumber(farads)}`
+        );
+      continue;
+    }
+    const dieGround = resolveCapacitanceGround(
+      grounds.map((port2) => dieSpiceNodes.get(port2))
+    );
+    const half = spiceNumber(farads / PI_SECTION_SHUNT_COUNT);
+    if (boardNode !== boardGround)
+      elements.push(`${prefix}${index}a ${boardNode} ${boardGround} ${half}`);
+    if (dieNode !== dieGround)
+      elements.push(`${prefix}${index}b ${dieNode} ${dieGround} ${half}`);
   }
   if (coupled) {
     const matrix = coupled.activePins.map((pin) => {

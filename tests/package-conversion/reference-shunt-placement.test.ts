@@ -2,7 +2,7 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import { convert, source, switchingInput } from "../fixtures/switching"
 
-test.failing("splits nonideal supply shunts across the board and die returns", () => {
+test("splits nonideal supply shunts across the board and die returns", () => {
   const next = switchingInput()
   const text = source
     .replace("L_pkg 0 0 0", "L_pkg 2n 2n 2n")
