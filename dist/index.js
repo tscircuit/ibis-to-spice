@@ -716,7 +716,7 @@ function buildExtendedPackage({
     ]
   };
 }
-function resolveScalarPackageData({
+function selectScalarPackageTerms({
   component,
   definition,
   mapped,
@@ -1346,7 +1346,7 @@ function convertIbisModelToSpice(input, ...args) {
     ...new Set(pins.flatMap((pin) => Object.values(pin.references)))
   ].sort();
   const omissions = definition.packagePolicy === "omit" ? [PACKAGE_OMISSION] : [];
-  const packageData = resolveScalarPackageData({
+  const scalarPackage = selectScalarPackageTerms({
     component,
     definition,
     mapped,
@@ -1359,7 +1359,7 @@ function convertIbisModelToSpice(input, ...args) {
     packagePolicy: definition.packagePolicy,
     tableExtrapolation: "hold-endpoint-current",
     omissions,
-    packageData,
+    packageData: scalarPackage,
     differentialPins: component.differentialPins,
     pins
   };
@@ -1374,7 +1374,7 @@ function convertIbisModelToSpice(input, ...args) {
   rails.forEach((port, i) => {
     mapping[`REF${i}`] = port;
   });
-  const usesExtendedPackage = definition.packagePolicy === "vendor" && !usesInlineScalarPackage(packageData);
+  const usesExtendedPackage = definition.packagePolicy === "vendor" && !usesInlineScalarPackage(scalarPackage);
   const identity = definition.corner === "typical" ? [metadata, schedules, duration] : [metadata, schedules, duration, definition.corner];
   const name = `IBIS_${sourceHash(JSON.stringify(identity)).slice(0, 20)}`;
   const extendedPackage = usesExtendedPackage ? buildExtendedPackage({
@@ -1412,7 +1412,7 @@ function convertIbisModelToSpice(input, ...args) {
     const ground = referenceNodes[1];
     let die = extendedPackage?.dieNodes.get(pin.port) || `PAD${i}`;
     if (definition.packagePolicy === "vendor" && !usesExtendedPackage) {
-      const terms = packageData.mappedPins.find(
+      const terms = scalarPackage.mappedPins.find(
         ({ physicalPin }) => physicalPin === pin.physicalPin
       );
       if (!terms)
@@ -1466,7 +1466,7 @@ function convertIbisModelToSpice(input, ...args) {
     warnings,
     metadata: {
       ...metadata,
-      packageData: extendedPackage?.packageData || metadata.packageData,
+      packageData: extendedPackage?.packageData || scalarPackage,
       ...tails.length ? { switchingTails: tails } : {}
     }
   };

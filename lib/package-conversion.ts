@@ -120,7 +120,7 @@ export function buildExtendedPackage({
   }
 }
 
-export function resolveScalarPackageData({
+export function selectScalarPackageTerms({
   component,
   definition,
   mapped,

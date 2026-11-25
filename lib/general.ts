@@ -1,7 +1,7 @@
 import {
   buildExtendedPackage,
   PACKAGE_OMISSION,
-  resolveScalarPackageData,
+  selectScalarPackageTerms,
   usesInlineScalarPackage,
 } from "./package-conversion"
 import {
@@ -90,7 +90,7 @@ export function convertIbisModelToSpice(
   ].sort()
   const omissions =
     definition.packagePolicy === "omit" ? [PACKAGE_OMISSION] : []
-  const packageData = resolveScalarPackageData({
+  const scalarPackage = selectScalarPackageTerms({
     component,
     definition,
     mapped,
@@ -103,7 +103,7 @@ export function convertIbisModelToSpice(
     packagePolicy: definition.packagePolicy,
     tableExtrapolation: "hold-endpoint-current",
     omissions,
-    packageData,
+    packageData: scalarPackage,
     differentialPins: component.differentialPins,
     pins,
   }
@@ -120,7 +120,7 @@ export function convertIbisModelToSpice(
   })
   const usesExtendedPackage =
     definition.packagePolicy === "vendor" &&
-    !usesInlineScalarPackage(packageData)
+    !usesInlineScalarPackage(scalarPackage)
   const identity =
     definition.corner === "typical"
       ? [metadata, schedules, duration]
@@ -168,7 +168,7 @@ export function convertIbisModelToSpice(
     const ground = referenceNodes[1]
     let die = extendedPackage?.dieNodes.get(pin.port) || `PAD${i}`
     if (definition.packagePolicy === "vendor" && !usesExtendedPackage) {
-      const terms = packageData.mappedPins.find(
+      const terms = scalarPackage.mappedPins.find(
         ({ physicalPin }) => physicalPin === pin.physicalPin,
       )
       if (!terms)
@@ -223,7 +223,7 @@ export function convertIbisModelToSpice(
     warnings,
     metadata: {
       ...metadata,
-      packageData: extendedPackage?.packageData || metadata.packageData,
+      packageData: extendedPackage?.packageData || scalarPackage,
       ...(tails.length ? { switchingTails: tails } : {}),
     },
   }
