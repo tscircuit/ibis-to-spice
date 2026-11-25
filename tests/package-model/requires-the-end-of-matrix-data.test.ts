@@ -1,0 +1,13 @@
+import { test } from "bun:test"
+import assert from "node:assert/strict"
+import { parsePackageModel } from "../fixtures/package-matrix-ibis"
+
+import { valid } from "../fixtures/package-matrix-ibis"
+
+test("requires the end of matrix data", () => {
+  const text = valid.replace("[End Model Data]", "")
+  assert.throws(
+    () => parsePackageModel({ text, name: "Example package" }),
+    /End Model Data/,
+  )
+})

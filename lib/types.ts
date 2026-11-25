@@ -1,3 +1,7 @@
+import type { CoupledPackageModel } from "./coupled-package"
+import type { PackageModel } from "./package-model"
+import type { WaveformTailTruncation } from "./switching-tail"
+
 export type IbisCorner = "typical" | "minimum" | "maximum"
 export type IbisRange<T = number> = [
   typical: T | null,
@@ -23,12 +27,14 @@ export interface IbisWaveform {
   kind: "rising" | "falling"
   resistance: number
   fixtureVoltage: IbisRange
-  data: Array<[
-    timeSeconds: number,
-    typicalVoltage: number,
-    minimumVoltage: number | null,
-    maximumVoltage: number | null,
-  ]>
+  data: Array<
+    [
+      timeSeconds: number,
+      typicalVoltage: number,
+      minimumVoltage: number | null,
+      maximumVoltage: number | null,
+    ]
+  >
 }
 
 export interface IbisBuffer {
@@ -71,8 +77,22 @@ export interface IbisComponent {
   }
   coupledPackage?: string
   unsupportedFeatures?: string[]
-  differentialPins: Array<{ pin: string; invertedPin: string; voltage: number | null; delay: IbisRange }>
-  pinMapping: Record<string, { pullup?: string; pulldown?: string; powerClamp?: string; groundClamp?: string; external?: string }>
+  differentialPins: Array<{
+    pin: string
+    invertedPin: string
+    voltage: number | null
+    delay: IbisRange
+  }>
+  pinMapping: Record<
+    string,
+    {
+      pullup?: string
+      pulldown?: string
+      powerClamp?: string
+      groundClamp?: string
+      external?: string
+    }
+  >
 }
 
 export interface IbisDocument {
@@ -81,6 +101,7 @@ export interface IbisDocument {
   selectors: Record<string, string[]>
   modelNames: string[]
   getBuffer(name: string): IbisBuffer
+  getPackageModel(name: string): PackageModel
 }
 
 /** Clock values are seconds when numeric; strings use explicit time units. */
@@ -130,9 +151,27 @@ export interface ConvertedIbisComponent {
 /** General API times are milliseconds when numeric; strings have explicit units. */
 export type IbisTimeInput = number | string
 export type IbisSource =
-  | { url: string; sha256: string; archive?: { member: string; memberSha256?: string }; file?: never; content?: never }
-  | { file: string; sha256?: string; archive?: { member: string; memberSha256?: string }; url?: never; content?: never }
-  | { content: string; sha256?: string; url?: never; file?: never; archive?: never }
+  | {
+      url: string
+      sha256: string
+      archive?: { member: string; memberSha256?: string }
+      file?: never
+      content?: never
+    }
+  | {
+      file: string
+      sha256?: string
+      archive?: { member: string; memberSha256?: string }
+      url?: never
+      content?: never
+    }
+  | {
+      content: string
+      sha256?: string
+      url?: never
+      file?: never
+      archive?: never
+    }
 export interface IbisReferencePorts {
   pullup?: string
   pulldown?: string
@@ -141,8 +180,10 @@ export interface IbisReferencePorts {
   external?: string
 }
 /** Resolved source ports for the four drive and clamp rails and the optional external rail. */
-export type ResolvedIbisReferencePorts =
-  Required<Omit<IbisReferencePorts, "external">> & Pick<IbisReferencePorts, "external">
+export type ResolvedIbisReferencePorts = Required<
+  Omit<IbisReferencePorts, "external">
+> &
+  Pick<IbisReferencePorts, "external">
 
 /** Scalar reference voltages in volts for the drive and clamp tables. */
 export type IbisReferenceVoltages = Record<
@@ -159,7 +200,9 @@ export interface IbisModelDefinition {
   corner: IbisCorner
   packagePolicy: "vendor" | "omit"
 }
-export type IbisPinRunState = { mode: "input" } | { mode: "output"; enabled: boolean }
+export type IbisPinRunState =
+  | { mode: "input" }
+  | { mode: "output"; enabled: boolean }
 export interface IbisBitsStimulus {
   unitInterval: IbisTimeInput
   startTime: IbisTimeInput
@@ -178,9 +221,36 @@ export interface IbisConversionMetadata {
   sourceSha256: string
   packagePolicy: "vendor" | "omit"
   omissions: string[]
-  packageData: { coupledModel?: string; mappedPins: Array<{ physicalPin: string; port: string; role: "signal" | "reference"; resistanceOhms: number | null; inductanceHenries: number | null; capacitanceFarads: number | null }> }
+  packageData: {
+    coupledModel?: string
+    matrices?: CoupledPackageModel
+    unusedPinPolicy?: "open-series-floating-capacitance"
+    mappedPins: Array<{
+      physicalPin: string
+      port: string
+      role: "signal" | "reference"
+      resistanceOhms: number | null
+      inductanceHenries: number | null
+      capacitanceFarads: number | null
+    }>
+  }
+  switchingTails?: WaveformTailTruncation[]
   differentialPins: IbisComponent["differentialPins"]
-  pins: Array<{ physicalPin: string; port: string; model: string; selector: string; selectorChoices: string[]; modelType: string; polarity: string; polarityDeclared: boolean; enable?: string; enableControlLevel?: 0 | 1; runState: IbisPinRunState; references: ResolvedIbisReferencePorts; stimulusHash?: string }>
+  pins: Array<{
+    physicalPin: string
+    port: string
+    model: string
+    selector: string
+    selectorChoices: string[]
+    modelType: string
+    polarity: string
+    polarityDeclared: boolean
+    enable?: string
+    enableControlLevel?: 0 | 1
+    runState: IbisPinRunState
+    references: ResolvedIbisReferencePorts
+    stimulusHash?: string
+  }>
 }
 export interface ConvertedGeneralIbisComponent extends ConvertedIbisComponent {
   metadata: IbisConversionMetadata

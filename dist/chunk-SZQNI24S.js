@@ -1,3 +1,336 @@
+// lib/ibis-sections.ts
+function sections(text) {
+  const headers = [
+    ...text.matchAll(/^[ \t]*\[([^\]\r\n]+)\][ \t]*([^\r\n]*)/gm)
+  ];
+  return headers.map((header, index) => ({
+    key: header[1].trim().toLowerCase().replace(/[_\s]+/g, " "),
+    argument: header[2].split("|")[0].trim(),
+    body: text.slice(
+      header.index + header[0].length,
+      headers[index + 1]?.index || text.length
+    )
+  }));
+}
+function lines(body) {
+  return body.split(/\r?\n/).map((line) => line.split("|")[0].trim()).filter(Boolean);
+}
+
+// lib/package-matrix-syntax.ts
+var SPARSE_ENTRY_FIELDS = 2;
+function matrixNumber({
+  token,
+  label
+}) {
+  try {
+    const matrixEntry = ibisNumber(token);
+    if (matrixEntry === null) throw new IbisError("invalid_package", "NA");
+    return matrixEntry;
+  } catch (cause) {
+    if (cause instanceof Error && cause.message.startsWith("Non-finite"))
+      throw new IbisError(
+        "invalid_package",
+        `${label}: finite matrix value required: ${token}`
+      );
+    throw new IbisError(
+      "invalid_package",
+      `${label}: invalid numeric matrix value ${token}`
+    );
+  }
+}
+function parseMatrix({
+  sections: sections2,
+  packagePinNames,
+  label
+}) {
+  const format = sections2[0].argument.toLowerCase();
+  const isSupportedFormat = [
+    "full_matrix",
+    "banded_matrix",
+    "sparse_matrix"
+  ].includes(format);
+  if (!isSupportedFormat || sections2[0].lines.length)
+    throw new IbisError("invalid_package", `${label}: invalid matrix format`);
+  const isBanded = format === "banded_matrix";
+  const hasBand = sections2[1]?.key === "bandwidth";
+  let bandwidth = packagePinNames.length - 1;
+  const hasInvalidBandwidth = hasBand && (!/^\d+$/.test(sections2[1].argument) || sections2[1].lines.length);
+  if (isBanded !== hasBand || hasInvalidBandwidth) {
+    throw new IbisError(
+      "invalid_package",
+      `${label}: [Bandwidth] required only for Banded_matrix before rows`
+    );
+  }
+  if (hasBand) bandwidth = Number(sections2[1].argument);
+  if (!Number.isSafeInteger(bandwidth) || bandwidth >= packagePinNames.length)
+    throw new IbisError(
+      "invalid_package",
+      `${label}: invalid bandwidth ${bandwidth}`
+    );
+  const rows = sections2.slice(1 + Number(hasBand));
+  const isRowOutOfOrder = rows.some(
+    (row, rowIndex) => row.key !== "row" || row.argument !== packagePinNames[rowIndex]
+  );
+  if (rows.length !== packagePinNames.length || isRowOutOfOrder)
+    throw new IbisError(
+      "invalid_package",
+      `${label}: row order must match [Pin Numbers] exactly`
+    );
+  let matrixRowTokens = [];
+  if (format !== "sparse_matrix")
+    matrixRowTokens = rows.map(
+      (row) => row.lines.flatMap((line) => line.split(/\s+/))
+    );
+  const isCircularBand = isBanded && bandwidth > 0 && matrixRowTokens.every((row) => row.length === bandwidth + 1);
+  const maxCircularBandwidth = Math.floor((packagePinNames.length - 1) / 2);
+  if (isCircularBand && bandwidth > maxCircularBandwidth) {
+    throw new IbisError(
+      "invalid_package",
+      `${label}: circular bandwidth creates redundant entries`
+    );
+  }
+  const matrix = packagePinNames.map(() => packagePinNames.map(() => 0));
+  const indices = new Map(
+    packagePinNames.map((pin, rowIndex) => [pin, rowIndex])
+  );
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    if (format === "sparse_matrix") {
+      const seen = /* @__PURE__ */ new Set();
+      for (const line of rows[rowIndex].lines) {
+        const tokens = line.split(/\s+/);
+        if (tokens.length !== SPARSE_ENTRY_FIELDS) {
+          throw new IbisError(
+            "invalid_package",
+            `${label} ${packagePinNames[rowIndex]}: each sparse (index, value) pair needs its own line`
+          );
+        }
+        const columnIndex = indices.get(tokens[0]);
+        if (columnIndex === void 0)
+          throw new IbisError(
+            "invalid_package",
+            `${label}: unknown sparse column pin ${tokens[0]}`
+          );
+        if (columnIndex < rowIndex)
+          throw new IbisError(
+            "invalid_package",
+            `${label}: sparse entries must use the upper triangle in [Pin Numbers] order`
+          );
+        if (seen.has(columnIndex))
+          throw new IbisError(
+            "invalid_package",
+            `${label}: duplicate sparse column ${tokens[0]}`
+          );
+        seen.add(columnIndex);
+        const matrixEntry = matrixNumber({ token: tokens[1], label });
+        matrix[columnIndex][rowIndex] = matrixEntry;
+        matrix[rowIndex][columnIndex] = matrixEntry;
+      }
+      continue;
+    }
+    let count = bandwidth + 1;
+    if (!isCircularBand)
+      count = Math.min(count, packagePinNames.length - rowIndex);
+    const rowLength = matrixRowTokens[rowIndex].length;
+    if (rowLength !== count) {
+      const detail = `expected ${count} entries, got ${rowLength}`;
+      throw new IbisError(
+        "invalid_package",
+        `${label} ${packagePinNames[rowIndex]}: ${detail}; inconsistent bandwidth or truncated row`
+      );
+    }
+    for (let diagonalOffset = 0; diagonalOffset < count; diagonalOffset++) {
+      const columnIndex = (rowIndex + diagonalOffset) % packagePinNames.length;
+      const matrixEntry = matrixNumber({
+        token: matrixRowTokens[rowIndex][diagonalOffset],
+        label
+      });
+      matrix[columnIndex][rowIndex] = matrixEntry;
+      matrix[rowIndex][columnIndex] = matrixEntry;
+    }
+  }
+  return matrix;
+}
+
+// lib/package-model.ts
+var PACKAGE_NAME_LIMIT = 40;
+var DESCRIPTION_LIMIT = 59;
+var PACKAGE_PIN_LIMIT = 5;
+var MATRIX_FIELDS = /* @__PURE__ */ new Map([
+  ["resistance matrix", "R"],
+  ["inductance matrix", "L"],
+  ["capacitance matrix", "C"]
+]);
+function parsePackageModel({
+  block,
+  name
+}) {
+  if (!name || name.length > PACKAGE_NAME_LIMIT)
+    throw new IbisError("invalid_package", `${name}: invalid package name`);
+  const [header, ...body] = sections(block);
+  if (lines(header.body).length) {
+    throw new IbisError(
+      "invalid_package",
+      `${name}: data before package metadata`
+    );
+  }
+  const end = body.findIndex(({ key }) => key === "end package model");
+  if (end < 0)
+    throw new IbisError(
+      "invalid_package",
+      `${name}: missing [End Package Model]`
+    );
+  if (body[end].argument)
+    throw new IbisError(
+      "invalid_package",
+      `${name}: unexpected data after [End Package Model]`
+    );
+  const dataSections = body.slice(0, end).filter(({ key }) => key !== "comment char").map(({ key, argument, body: body2 }) => ({ key, argument, lines: lines(body2) }));
+  const metadata = {};
+  const pins = [];
+  const mergedPins = {};
+  const matrices = {};
+  let declaredPinCount = 0;
+  let phase = "metadata";
+  for (let i = 0; i < dataSections.length; i++) {
+    const section = dataSections[i];
+    const { key, argument, lines: lines2 } = section;
+    if (key === "number of sections")
+      throw new IbisError(
+        "invalid_package",
+        `${name}: package sections are unsupported ([Number Of Sections]); scalar fallback is forbidden`
+      );
+    if (["manufacturer", "oem", "description", "number of pins"].includes(key)) {
+      if (phase !== "metadata" || key in metadata || lines2.length) {
+        throw new IbisError(
+          "invalid_package",
+          `${name}: invalid or duplicate [${key}]`
+        );
+      }
+      metadata[key] = argument;
+      if (key === "number of pins") {
+        const pinCount = Number(argument);
+        if (!/^\d+$/.test(argument) || pinCount < 1 || !Number.isSafeInteger(pinCount)) {
+          throw new IbisError(
+            "invalid_package",
+            `${name}: invalid [Number Of Pins]`
+          );
+        }
+        declaredPinCount = pinCount;
+        continue;
+      }
+      let maxLength = PACKAGE_NAME_LIMIT;
+      if (key === "description") maxLength = DESCRIPTION_LIMIT;
+      if (!argument || argument.length > maxLength)
+        throw new IbisError("invalid_package", `${name}: invalid [${key}]`);
+      continue;
+    }
+    if (key === "pin numbers") {
+      if (phase !== "metadata" || !declaredPinCount || argument) {
+        throw new IbisError(
+          "invalid_package",
+          `${name}: [Number Of Pins] must precede [Pin Numbers]`
+        );
+      }
+      for (const line of lines2) {
+        const pinKey = line.toLowerCase();
+        const hasSectionSyntax = /\s/.test(line) || line.includes("=") || line.includes("/");
+        if (hasSectionSyntax || pinKey === "fork" || pinKey === "endfork") {
+          throw new IbisError(
+            "invalid_package",
+            `${name}: package section syntax is unsupported in [Pin Numbers]`
+          );
+        }
+        if (line.length > PACKAGE_PIN_LIMIT || pins.includes(line)) {
+          throw new IbisError(
+            "invalid_package",
+            `${name}: invalid or duplicate package pin ${line}`
+          );
+        }
+        pins.push(line);
+      }
+      if (pins.length !== declaredPinCount) {
+        throw new IbisError(
+          "invalid_package",
+          `${name}: package pin count ${pins.length} differs from [Number Of Pins] ${declaredPinCount}`
+        );
+      }
+      phase = "pins";
+      continue;
+    }
+    if (key === "merged pins") {
+      if (phase !== "pins" || !pins.includes(argument) || !lines2.length)
+        throw new IbisError(
+          "invalid_package",
+          `${name}: invalid [Merged Pins] representative ${argument}`
+        );
+      for (const mergedPin of lines2.flatMap((line) => line.split(/\s+/))) {
+        if (pins.includes(mergedPin) || Object.hasOwn(mergedPins, mergedPin))
+          throw new IbisError(
+            "invalid_package",
+            `${name}: invalid or duplicate merged pin ${mergedPin}`
+          );
+        mergedPins[mergedPin] = argument;
+      }
+      continue;
+    }
+    if (key === "model data") {
+      if (phase !== "pins" || argument || lines2.length)
+        throw new IbisError("invalid_package", `${name}: invalid [Model Data]`);
+      phase = "data";
+      continue;
+    }
+    if (key === "end model data") {
+      if (phase !== "data" || argument || lines2.length)
+        throw new IbisError(
+          "invalid_package",
+          `${name}: invalid [End Model Data]`
+        );
+      phase = "end";
+      continue;
+    }
+    const field = MATRIX_FIELDS.get(key);
+    if (!field || phase !== "data" || matrices[field])
+      throw new IbisError(
+        "invalid_package",
+        `${name}: unexpected or duplicate [${key}]`
+      );
+    let end2 = i + 1;
+    while (end2 < dataSections.length && ["bandwidth", "row"].includes(dataSections[end2].key))
+      end2++;
+    matrices[field] = parseMatrix({
+      sections: dataSections.slice(i, end2),
+      packagePinNames: pins,
+      label: `${name} [${key}]`
+    });
+    i = end2 - 1;
+  }
+  for (const key of ["manufacturer", "oem", "description"]) {
+    if (!(key in metadata))
+      throw new IbisError(
+        "invalid_package",
+        `${name}: required [${key.toUpperCase()}] missing`
+      );
+  }
+  if (phase !== "end")
+    throw new IbisError("invalid_package", `${name}: missing [End Model Data]`);
+  if (!matrices.L || !matrices.C)
+    throw new IbisError(
+      "invalid_package",
+      `${name}: required inductance/capacitance matrix missing`
+    );
+  return {
+    name,
+    manufacturer: metadata.manufacturer,
+    oem: metadata.oem,
+    description: metadata.description,
+    pins,
+    R: matrices.R || pins.map(() => pins.map(() => 0)),
+    L: matrices.L,
+    C: matrices.C,
+    mergedPins
+  };
+}
+
 // lib/parse-ibis.ts
 var IbisError = class extends Error {
   constructor(code, message) {
@@ -60,22 +393,6 @@ function rampRatio(token) {
 function rampRange(tokens = []) {
   const [typical, minimum, maximum] = tokens;
   return [rampRatio(typical), rampRatio(minimum), rampRatio(maximum)];
-}
-function sections(text) {
-  const headers = [
-    ...text.matchAll(/^[ \t]*\[([^\]\r\n]+)\][ \t]*([^\r\n]*)/gm)
-  ];
-  return headers.map((header, index) => ({
-    key: header[1].trim().toLowerCase().replace(/[_\s]+/g, " "),
-    argument: header[2].split("|")[0].trim(),
-    body: text.slice(
-      header.index + header[0].length,
-      headers[index + 1]?.index ?? text.length
-    )
-  }));
-}
-function lines(body) {
-  return body.split(/\r?\n/).map((line) => line.split("|")[0].trim()).filter(Boolean);
 }
 function table(section) {
   const rows = lines(section.body).filter((line) => /^[+\-.\d]/.test(line)).map((line) => {
@@ -248,6 +565,7 @@ function parseIbis(text) {
   const components = /* @__PURE__ */ Object.create(null);
   const selectors = /* @__PURE__ */ Object.create(null);
   const modelText = /* @__PURE__ */ Object.create(null);
+  const packageDefinitions = /* @__PURE__ */ new Map();
   for (let i = 0; i < headers.length; i++) {
     const header = headers[i];
     const key = header[1].toLowerCase().replace(/_/g, " "), name = header[2].split("|")[0].trim();
@@ -255,6 +573,10 @@ function parseIbis(text) {
       header.index,
       headers[i + 1]?.index ?? text.length
     );
+    if (key === "define package model") {
+      const definitions = packageDefinitions.get(name) || [];
+      packageDefinitions.set(name, [...definitions, block]);
+    }
     if (key === "model") {
       if (modelText[name])
         throw new IbisError("duplicate_model", `Duplicate IBIS buffer: ${name}`);
@@ -337,6 +659,16 @@ function parseIbis(text) {
     components,
     selectors,
     modelNames: Object.keys(modelText),
+    getPackageModel(name) {
+      const definitions = packageDefinitions.get(name);
+      if (!definitions) {
+        throw new IbisError("invalid_package", `${name}: [Define Package Model] missing in IBIS source; external .pkg lookup is unsupported; scalar fallback is forbidden`);
+      }
+      if (definitions.length > 1) {
+        throw new IbisError("invalid_package", `${name}: duplicate package definition`);
+      }
+      return parsePackageModel({ name, block: definitions[0] });
+    },
     getBuffer(name) {
       if (!modelText[name])
         throw new IbisError(

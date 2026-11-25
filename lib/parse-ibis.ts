@@ -1,3 +1,5 @@
+import { lines, sections, type Section } from "./ibis-sections"
+import { parsePackageModel } from "./package-model"
 import type {
   IbisBuffer,
   IbisComponent,
@@ -82,33 +84,6 @@ function rampRange(tokens: string[] = []): IbisRange<IbisRampRatio> {
   return [rampRatio(typical), rampRatio(minimum), rampRatio(maximum)]
 }
 
-interface Section {
-  key: string
-  argument: string
-  body: string
-}
-function sections(text: string): Section[] {
-  const headers = [
-    ...text.matchAll(/^[ \t]*\[([^\]\r\n]+)\][ \t]*([^\r\n]*)/gm),
-  ]
-  return headers.map((header, index) => ({
-    key: header[1]
-      .trim()
-      .toLowerCase()
-      .replace(/[_\s]+/g, " "),
-    argument: header[2].split("|")[0].trim(),
-    body: text.slice(
-      header.index! + header[0].length,
-      headers[index + 1]?.index ?? text.length,
-    ),
-  }))
-}
-function lines(body: string): string[] {
-  return body
-    .split(/\r?\n/)
-    .map((line) => line.split("|")[0].trim())
-    .filter(Boolean)
-}
 function table(section: Section): IbisTable {
   const rows = lines(section.body)
     .filter((line) => /^[+\-.\d]/.test(line))
@@ -293,6 +268,7 @@ export function parseIbis(text: string): IbisDocument {
   const components: Record<string, IbisComponent> = Object.create(null)
   const selectors: Record<string, string[]> = Object.create(null)
   const modelText: Record<string, string> = Object.create(null)
+  const packageDefinitions = new Map<string, string[]>()
   for (let i = 0; i < headers.length; i++) {
     const header = headers[i]
     const key = header[1].toLowerCase().replace(/_/g, " "),
@@ -301,6 +277,10 @@ export function parseIbis(text: string): IbisDocument {
       header.index!,
       headers[i + 1]?.index ?? text.length,
     )
+    if (key === "define package model") {
+      const definitions = packageDefinitions.get(name) || []
+      packageDefinitions.set(name, [...definitions, block])
+    }
     if (key === "model") {
       if (modelText[name])
         throw new IbisError("duplicate_model", `Duplicate IBIS buffer: ${name}`)
@@ -388,6 +368,16 @@ export function parseIbis(text: string): IbisDocument {
     components,
     selectors,
     modelNames: Object.keys(modelText),
+    getPackageModel(name) {
+      const definitions = packageDefinitions.get(name)
+      if (!definitions) {
+        throw new IbisError("invalid_package", `${name}: [Define Package Model] missing in IBIS source; external .pkg lookup is unsupported; scalar fallback is forbidden`)
+      }
+      if (definitions.length > 1) {
+        throw new IbisError("invalid_package", `${name}: duplicate package definition`)
+      }
+      return parsePackageModel({ name, block: definitions[0] })
+    },
     getBuffer(name) {
       if (!modelText[name])
         throw new IbisError(
