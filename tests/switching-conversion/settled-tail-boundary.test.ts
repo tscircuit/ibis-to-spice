@@ -9,7 +9,7 @@ import {
   switchingInput,
 } from "../fixtures/switching"
 
-test.failing("keeps settled measurements until an overlapping transition actually starts", () => {
+test("keeps settled measurements until an overlapping transition actually starts", () => {
   const input = switchingInput()
   // The 0.8 ns sample is settled, but differs from the measured 1 ns sample.
   const text = source.replaceAll(

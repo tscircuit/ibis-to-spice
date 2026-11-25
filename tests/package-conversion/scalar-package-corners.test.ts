@@ -2,7 +2,7 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import { convert, run, source, switchingInput } from "../fixtures/switching"
 
-test("uses each requested corner for scalar package and die references", () => {
+test("uses each requested corner for scalar package and board-powered die references", () => {
   const input = switchingInput()
   const cornerSource = source
     .replace("R_pkg 0 0 0", "R_pkg 1 2 3")
@@ -20,10 +20,10 @@ test("uses each requested corner for scalar package and die references", () => {
   })
   assert.match(minimum.source, /RPKG0 PAD0 PKGR0 2\n/)
   assert.match(minimum.source, /LPKG0 PKGR0 PKGL0 2e-9\n/)
-  assert.match(minimum.source, /CPKG0a PAD0 DIE2 1e-12\n/)
-  assert.match(minimum.source, /VDIE1 DIE1 0 1\.4\n/)
+  assert.match(minimum.source, /CPKG0 PAD0 REF1 2e-12\n/)
+  assert.match(minimum.source, /XBUF0 PKGL0 PKGL1 PKGL2 PKGL1 PKGL2 /)
   assert.match(maximum.source, /RPKG0 PAD0 PKGR0 3\n/)
-  assert.match(maximum.source, /LPKG0 PKGR0 PKGL0 3(?:\.0+4)?e-9\n/)
-  assert.match(maximum.source, /CPKG0a PAD0 DIE2 1\.5e-12\n/)
-  assert.match(maximum.source, /VDIE1 DIE1 0 1\.6\n/)
+  assert.match(maximum.source, /LPKG0 PKGR0 PKGL0 3e-9\n/)
+  assert.match(maximum.source, /CPKG0 PAD0 REF1 3e-12\n/)
+  assert.match(maximum.source, /XBUF0 PKGL0 PKGL1 PKGL2 PKGL1 PKGL2 /)
 })

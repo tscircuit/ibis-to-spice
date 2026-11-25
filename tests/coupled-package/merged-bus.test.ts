@@ -54,7 +54,7 @@ V2 NC VDD NC NC
     V1: "V2",
     G1: "G2",
   })
-  assert.match(merged.source, /VPKGM2 REF0 PKGM2 0/)
-  assert.match(merged.source, /VPKGM3 REF1 PKGM3 0/)
+  assert.match(merged.source, /VPKGS2 REF0 PKGS2 0/)
+  assert.match(merged.source, /VPKGS3 REF1 PKGS3 0/)
   assert.doesNotMatch(merged.source, /RPKGU|LPKGU|CPKGU/)
 })

@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import createEngine from "@tscircuit/ngspice-spice-engine"
 import { convert, source, switchingInput } from "../fixtures/switching"
 
-test.failing("uses board bias through a resistive VREF lead without drawing DC current", async () => {
+test("uses board bias through a resistive VREF lead without drawing DC current", async () => {
   const next = switchingInput({ hasExternalReference: true })
   next.definition.pinMap["4"] = "VREF"
   next.definition.references = {

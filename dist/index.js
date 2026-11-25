@@ -4,11 +4,15 @@ import {
   IbisError,
   IbisReferenceError,
   bufferTables,
+  checkCapacitance,
+  checkPositive,
+  checkSymmetricMatrix,
   clockWeights,
   convertIbisBuffer,
   convertIbisComponentToSpice,
   cornerValue,
   createIbisModelResolver,
+  getCapacitanceRowTolerance,
   ibisNumber,
   interpolate,
   loadIbisDefinitionSource,
@@ -20,115 +24,17 @@ import {
   seconds,
   sourceHash,
   spiceNumber,
+  sumReferenceCapacitance,
   switchingWeights,
   validateIbisDefinitionSource
-} from "./chunk-SZQNI24S.js";
+} from "./chunk-SFO7G3Q5.js";
 
 // lib/reduce-package-matrices.ts
-var PIVOT_TOLERANCE = 1e-12;
-function getSymmetricMatrixScale({
-  matrix,
-  label
-}) {
-  const size = matrix.length;
-  const hasInvalidRow = matrix.some(
-    (row) => row.length !== size || row.some((value) => !Number.isFinite(value))
-  );
-  if (hasInvalidRow)
-    throw new IbisError(
-      "invalid_package",
-      `${label}: finite square matrix required`
-    );
-  const scale = matrix.reduce(
-    (maximum, row) => row.reduce(
-      (current, entry) => Math.max(current, Math.abs(entry)),
-      maximum
-    ),
-    0
-  );
-  if (matrix.some(
-    (row, rowIndex) => row.some(
-      (entry, columnIndex) => Math.abs(entry - matrix[columnIndex][rowIndex]) > scale * PIVOT_TOLERANCE
-    )
-  ))
-    throw new IbisError(
-      "invalid_package",
-      `${label}: symmetric matrix required`
-    );
-  return scale;
-}
-function checkPositive({
-  matrix,
-  label,
-  isStrict
-}) {
-  let requirement = "semidefinite";
-  if (isStrict) requirement = "definite";
-  const size = matrix.length;
-  const scale = getSymmetricMatrixScale({ matrix, label });
-  if (matrix.some((row, index) => row[index] < 0))
-    throw new IbisError(
-      "invalid_package",
-      `${label}: negative diagonal; matrix is not positive ${requirement}`
-    );
-  const normalizedMatrix = matrix.map(
-    (row) => row.map((coefficient) => coefficient / (scale || 1))
-  );
-  for (let pivotIndex = 0; pivotIndex < size; pivotIndex++) {
-    const pivot = normalizedMatrix[pivotIndex][pivotIndex];
-    const isNearZeroPivot = pivot <= PIVOT_TOLERANCE;
-    const hasNonzeroColumn = isNearZeroPivot && !isStrict && normalizedMatrix.slice(pivotIndex + 1).some((row) => Math.abs(row[pivotIndex]) > PIVOT_TOLERANCE);
-    if (pivot < -PIVOT_TOLERANCE || isNearZeroPivot && isStrict || hasNonzeroColumn) {
-      throw new IbisError(
-        "invalid_package",
-        `${label}: matrix is not positive ${requirement} at pivot ${pivotIndex + 1}; passive package required`
-      );
-    }
-    if (isNearZeroPivot) continue;
-    for (let rowIndex = pivotIndex + 1; rowIndex < size; rowIndex++) {
-      for (let columnIndex = rowIndex; columnIndex < size; columnIndex++) {
-        normalizedMatrix[rowIndex][columnIndex] -= normalizedMatrix[rowIndex][pivotIndex] * normalizedMatrix[columnIndex][pivotIndex] / pivot;
-        normalizedMatrix[columnIndex][rowIndex] = normalizedMatrix[rowIndex][columnIndex];
-      }
-    }
-  }
-}
-function capacitanceRowTolerance(row) {
-  return PIVOT_TOLERANCE * row.reduce((sum, entry) => sum + Math.abs(entry), 0);
-}
-function sumReferenceCapacitance(row) {
-  const capacitanceFarads = row.reduce((sum, entry) => sum + entry, 0);
-  if (Math.abs(capacitanceFarads) <= capacitanceRowTolerance(row)) return 0;
-  return capacitanceFarads;
-}
-function checkCapacitance({
-  matrix,
-  label
-}) {
-  for (let rowIndex = 0; rowIndex < matrix.length; rowIndex++) {
-    const row = matrix[rowIndex];
-    if (row.some(
-      (capacitance, columnIndex) => rowIndex !== columnIndex && capacitance > 0
-    )) {
-      const requirement = "correction requires uniformly positive couplings and diagonally dominant rows";
-      throw new IbisError(
-        "invalid_package",
-        `${label}: Maxwell capacitance has positive off-diagonal entries; ${requirement}`
-      );
-    }
-    const reference = sumReferenceCapacitance(row);
-    if (reference < 0)
-      throw new IbisError(
-        "invalid_package",
-        `${label}: negative reference capacitance (Maxwell row sum)`
-      );
-  }
-}
 function reducePackageMatrices({
   model,
   pins
 }) {
-  if (new Set(pins).size !== pins.length)
+  if (new Set(pins).size !== pins.length || new Set(model.pins).size !== model.pins.length)
     throw new IbisError(
       "invalid_package",
       `${model.name}: distinct selected package pins required`
@@ -144,67 +50,31 @@ function reducePackageMatrices({
     }
     return index;
   });
-  checkPositive({
-    matrix: model.R,
-    label: `${model.name} resistance`,
-    isStrict: false
-  });
+  for (const [field, label] of [
+    ["R", "resistance"],
+    ["L", "inductance"],
+    ["C", "capacitance"]
+  ])
+    checkSymmetricMatrix({
+      matrix: model[field],
+      size: model.pins.length,
+      label: `${model.name} ${label}`
+    });
+  checkPositive({ matrix: model.R, label: `${model.name} resistance` });
   checkPositive({
     matrix: model.L,
     label: `${model.name} inductance`,
-    isStrict: true
+    requireIndependentLeads: true
   });
-  getSymmetricMatrixScale({
-    matrix: model.C,
-    label: `${model.name} capacitance`
-  });
-  const offDiagonal = model.C.flatMap(
-    (row, rowIndex) => row.filter(
-      (capacitance, columnIndex) => rowIndex !== columnIndex && capacitance !== 0
-    )
-  );
-  const areOffDiagonalEntriesPositive = offDiagonal.length > 0 && offDiagonal.every((capacitance) => capacitance > 0);
-  const shouldConvertCapacitanceSigns = areOffDiagonalEntriesPositive && model.C.every((row, rowIndex) => {
-    const coupling = row.reduce((sum, capacitance, columnIndex) => {
-      if (rowIndex === columnIndex) return sum;
-      return sum + Math.abs(capacitance);
-    }, 0);
-    return row[rowIndex] - coupling >= -capacitanceRowTolerance(row);
-  });
-  const C = model.C.map(
-    (row, rowIndex) => row.map((capacitance, columnIndex) => {
-      if (shouldConvertCapacitanceSigns && rowIndex !== columnIndex && capacitance !== 0)
-        return -capacitance;
-      return capacitance;
-    })
-  );
-  checkCapacitance({ matrix: C, label: model.name });
+  const { capacitance, negatedEntries } = normalizeCapacitanceSigns(model.C);
+  checkCapacitance({ matrix: capacitance, label: model.name });
   const unusedPackagePinIndices = model.pins.map((_, rowIndex) => rowIndex).filter((rowIndex) => !packagePinIndices.includes(rowIndex));
-  const reducedCapacitance = C.map((row) => [...row]);
-  let remainingPackagePinIndices = model.pins.map((_, rowIndex) => rowIndex);
-  for (const pivotIndex of unusedPackagePinIndices) {
-    remainingPackagePinIndices = remainingPackagePinIndices.filter(
-      (rowIndex) => rowIndex !== pivotIndex
-    );
-    const pivot = reducedCapacitance[pivotIndex][pivotIndex];
-    if (pivot <= 0) {
-      if (remainingPackagePinIndices.some(
-        (rowIndex) => Math.abs(reducedCapacitance[pivotIndex][rowIndex]) > capacitanceRowTolerance(reducedCapacitance[pivotIndex])
-      ))
-        throw new IbisError(
-          "invalid_package",
-          `${model.name}: singular capacitance at unused package pin ${model.pins[pivotIndex]}`
-        );
-      continue;
-    }
-    for (const rowIndex of remainingPackagePinIndices) {
-      for (const columnIndex of remainingPackagePinIndices) {
-        if (columnIndex < rowIndex) continue;
-        reducedCapacitance[rowIndex][columnIndex] -= reducedCapacitance[rowIndex][pivotIndex] / pivot * reducedCapacitance[pivotIndex][columnIndex];
-        reducedCapacitance[columnIndex][rowIndex] = reducedCapacitance[rowIndex][columnIndex];
-      }
-    }
-  }
+  const reducedCapacitance = reduceFloatingCapacitance({
+    capacitance,
+    pinNames: model.pins,
+    unusedPackagePinIndices,
+    label: model.name
+  });
   const reducedMatrices = {
     activePins: pins,
     unusedPins: unusedPackagePinIndices.map((rowIndex) => model.pins[rowIndex]),
@@ -226,53 +96,107 @@ function reducePackageMatrices({
     }
   };
   checkPositive({
+    matrix: reducedMatrices.R,
+    label: `${model.name} reduced resistance`
+  });
+  checkPositive({
     matrix: reducedMatrices.L,
     label: `${model.name} reduced inductance`,
-    isStrict: true
+    requireIndependentLeads: true
   });
   checkCapacitance({
     matrix: reducedMatrices.C,
     label: `${model.name} reduced`
   });
-  if (shouldConvertCapacitanceSigns)
-    reducedMatrices.capacitanceSignCorrection = {
+  if (negatedEntries === 0) return reducedMatrices;
+  return {
+    ...reducedMatrices,
+    capacitanceSignCorrection: {
       packageModel: model.name,
-      negatedEntries: offDiagonal.length
-    };
-  return reducedMatrices;
+      negatedEntries
+    }
+  };
+}
+function normalizeCapacitanceSigns(matrix) {
+  const offDiagonal = matrix.flatMap(
+    (row, rowIndex) => row.filter(
+      (capacitance2, columnIndex) => rowIndex !== columnIndex && capacitance2 !== 0
+    )
+  );
+  const areOffDiagonalEntriesPositive = offDiagonal.length > 0 && offDiagonal.every((capacitance2) => capacitance2 > 0);
+  const shouldConvertCapacitanceSigns = areOffDiagonalEntriesPositive && matrix.every((row, rowIndex) => {
+    const coupling = row.reduce((sum, capacitance2, columnIndex) => {
+      if (rowIndex === columnIndex) return sum;
+      return sum + Math.abs(capacitance2);
+    }, 0);
+    return row[rowIndex] - coupling >= -getCapacitanceRowTolerance(row);
+  });
+  const capacitance = matrix.map(
+    (row, rowIndex) => row.map((capacitance2, columnIndex) => {
+      if (shouldConvertCapacitanceSigns && rowIndex !== columnIndex && capacitance2 !== 0)
+        return -capacitance2;
+      return capacitance2;
+    })
+  );
+  return {
+    capacitance,
+    negatedEntries: shouldConvertCapacitanceSigns ? offDiagonal.length : 0
+  };
+}
+function reduceFloatingCapacitance({
+  capacitance,
+  pinNames,
+  unusedPackagePinIndices,
+  label
+}) {
+  const reducedCapacitance = capacitance.map((row) => [...row]);
+  let remainingPackagePinIndices = pinNames.map((_, rowIndex) => rowIndex);
+  for (const pivotIndex of unusedPackagePinIndices) {
+    remainingPackagePinIndices = remainingPackagePinIndices.filter(
+      (rowIndex) => rowIndex !== pivotIndex
+    );
+    const pivot = reducedCapacitance[pivotIndex][pivotIndex];
+    if (pivot <= 0) {
+      if (remainingPackagePinIndices.some(
+        (rowIndex) => Math.abs(reducedCapacitance[pivotIndex][rowIndex]) > getCapacitanceRowTolerance(reducedCapacitance[pivotIndex])
+      ))
+        throw new IbisError(
+          "invalid_package",
+          `${label}: singular capacitance at unused package pin ${pinNames[pivotIndex]}`
+        );
+      continue;
+    }
+    for (const rowIndex of remainingPackagePinIndices) {
+      for (const columnIndex of remainingPackagePinIndices) {
+        if (columnIndex < rowIndex) continue;
+        reducedCapacitance[rowIndex][columnIndex] -= reducedCapacitance[rowIndex][pivotIndex] / pivot * reducedCapacitance[pivotIndex][columnIndex];
+        reducedCapacitance[columnIndex][rowIndex] = reducedCapacitance[rowIndex][columnIndex];
+      }
+    }
+  }
+  return reducedCapacitance;
 }
 
 // lib/coupled-package.ts
 var PI_SECTION_SHUNT_COUNT = 2;
-function packagePinBuses({
+function getPackageRailBus({
   component,
-  packagePinName
+  pinName
 }) {
-  const pin = component.pins[packagePinName];
-  const mapping = component.pinMapping[packagePinName];
-  if (!pin || !mapping) return [];
-  const pinModelName = pin.model.toLowerCase();
-  let roles = [];
-  if (pinModelName === "power") roles = ["pullup", "powerClamp"];
-  if (pinModelName === "gnd") roles = ["pulldown", "groundClamp"];
-  return roles.flatMap((role) => {
-    const bus = mapping[role];
-    if (bus === void 0) return [];
-    return [bus];
-  });
+  const mapping = component.pinMapping[pinName];
+  const kind = component.pins[pinName]?.model.toLowerCase();
+  if (kind === "power") return mapping?.pullup || mapping?.powerClamp;
+  if (kind === "gnd") return mapping?.pulldown || mapping?.groundClamp;
 }
 function sharePackageBus({
   component,
   packagePinName,
   matrixPinName
 }) {
-  const packagePinModel = component.pins[packagePinName]?.model.toLowerCase();
-  if (packagePinModel !== component.pins[matrixPinName]?.model.toLowerCase())
-    return false;
-  const buses = packagePinBuses({ component, packagePinName });
-  return packagePinBuses({ component, packagePinName: matrixPinName }).some(
-    (bus) => buses.includes(bus)
-  );
+  const kind = component.pins[packagePinName]?.model.toLowerCase();
+  if (kind !== component.pins[matrixPinName]?.model.toLowerCase()) return false;
+  const bus = getPackageRailBus({ component, pinName: packagePinName });
+  return bus !== void 0 && bus === getPackageRailBus({ component, pinName: matrixPinName });
 }
 function formatCapacitanceSignWarnings({
   selected,
@@ -293,8 +217,13 @@ function resolveCoupledPackage({
   pins
 }) {
   if (component.coupledPackage === void 0) return void 0;
+  if (!document.getPackageModel)
+    throw new IbisError(
+      "invalid_package",
+      `${component.name}: use a parsed document to resolve the coupled package`
+    );
   const model = document.getPackageModel(component.coupledPackage);
-  const mergedPins = {};
+  const mergedPins = /* @__PURE__ */ Object.create(null);
   for (const [packagePinName, matrixPinName] of Object.entries(
     model.mergedPins || {}
   )) {
@@ -325,7 +254,10 @@ function resolveCoupledPackage({
       pins.map((pin) => mergedPins[pin] || pin).filter((pin) => model.pins.includes(pin))
     )
   ];
-  return { ...reducePackageMatrices({ model, pins: activePins }), mergedPins };
+  return {
+    ...reducePackageMatrices({ model, pins: activePins }),
+    mergedPins: { ...mergedPins }
+  };
 }
 function comparePinPackageTerms({
   component,
@@ -353,310 +285,372 @@ function buildCoupledPackageSpiceElements({
   matrices,
   terminals,
   die,
-  ground
+  ground,
+  boardGround = ground
 }) {
+  if (die.length !== terminals.length || Array.from(die).some((node) => !node) || Array.from(terminals).some((node) => !node) || !ground || !boardGround)
+    throw new IbisError(
+      "invalid_package",
+      "Package matrix requires one board and die node per pin and a ground reference"
+    );
+  for (const field of ["R", "L", "C"])
+    checkSymmetricMatrix({
+      matrix: matrices[field],
+      size: terminals.length,
+      label: field
+    });
+  checkPositive({
+    matrix: matrices.R,
+    label: "Package resistance for SPICE",
+    requireIndependentLeads: true
+  });
+  checkPositive({
+    matrix: matrices.L,
+    label: "Package inductance for SPICE",
+    requireIndependentLeads: true
+  });
+  checkCapacitance({
+    matrix: matrices.C,
+    label: "Package capacitance for SPICE"
+  });
+  const { R, L, C } = matrices;
   const elements = [];
-  for (let i = 0; i < terminals.length; i++) {
-    let node = `PKGS${i}`;
-    elements.push(`VPKGS${i} ${terminals[i]} ${node} 0`);
-    if (matrices.R[i][i] > 0) {
-      elements.push(`RPKG${i} ${node} PKGR${i} ${matrices.R[i][i]}`);
-      node = `PKGR${i}`;
-    }
-    for (let j = 0; j < terminals.length; j++) {
-      if (i === j || matrices.R[i][j] === 0) continue;
-      const next = `PKGR${i}_${j}`;
-      elements.push(
-        `HPKG${i}_${j} ${node} ${next} VPKGS${j} ${matrices.R[i][j]}`
-      );
-      node = next;
-    }
-    elements.push(`LPKG${i} ${node} ${die[i]} ${matrices.L[i][i]}`);
-    const shuntCapacitanceFarads = sumReferenceCapacitance(matrices.C[i]);
-    if (shuntCapacitanceFarads > 0) {
-      const halfShuntCapacitanceFarads = shuntCapacitanceFarads / PI_SECTION_SHUNT_COUNT;
-      elements.push(
-        `CPKG${i}a ${terminals[i]} ${ground} ${halfShuntCapacitanceFarads}`,
-        `CPKG${i}b ${die[i]} ${ground} ${halfShuntCapacitanceFarads}`
-      );
+  for (const [i, terminal] of terminals.entries()) {
+    elements.push(
+      ...stampSeriesLead({ R, L, index: i, terminal, dieNode: die[i] })
+    );
+    const shunt = sumReferenceCapacitance(C[i]) / PI_SECTION_SHUNT_COUNT;
+    if (shunt > 0) {
+      if (terminal !== boardGround)
+        elements.push(
+          `CPKG${i}a ${terminal} ${boardGround} ${spiceNumber(shunt)}`
+        );
+      if (die[i] !== ground)
+        elements.push(`CPKG${i}b ${die[i]} ${ground} ${spiceNumber(shunt)}`);
     }
     for (let j = i + 1; j < terminals.length; j++) {
-      const coupling = matrices.L[i][j] / Math.sqrt(matrices.L[i][i] * matrices.L[j][j]);
-      if (coupling !== 0)
-        elements.push(`KPKG${i}_${j} LPKG${i} LPKG${j} ${coupling}`);
-      const halfMutualCapacitanceFarads = -matrices.C[i][j] / PI_SECTION_SHUNT_COUNT;
-      if (!(halfMutualCapacitanceFarads > 0)) continue;
-      elements.push(
-        `CPKG${i}_${j}a ${terminals[i]} ${terminals[j]} ${halfMutualCapacitanceFarads}`,
-        `CPKG${i}_${j}b ${die[i]} ${die[j]} ${halfMutualCapacitanceFarads}`
-      );
+      if (L[i][j] !== 0) {
+        const coupling = L[i][j] / Math.sqrt(L[i][i]) / Math.sqrt(L[j][j]);
+        elements.push(
+          `KPKG${i}_${j} LPKG${i} LPKG${j} ${spiceNumber(coupling)}`
+        );
+      }
+      const mutual = -C[i][j] / PI_SECTION_SHUNT_COUNT;
+      if (mutual === 0) continue;
+      if (terminal !== terminals[j])
+        elements.push(
+          `CPKG${i}_${j}a ${terminal} ${terminals[j]} ${spiceNumber(mutual)}`
+        );
+      if (die[i] !== die[j])
+        elements.push(
+          `CPKG${i}_${j}b ${die[i]} ${die[j]} ${spiceNumber(mutual)}`
+        );
     }
   }
   return elements;
 }
+function stampSeriesLead({
+  R,
+  L,
+  index,
+  terminal,
+  dieNode
+}) {
+  const resistance = R[index][index];
+  const inductance = L[index][index];
+  if (resistance === 0 && inductance === 0) {
+    if (terminal === dieNode) return [];
+    return [`VPKGS${index} ${terminal} ${dieNode} 0`];
+  }
+  let node = `PKGS${index}`;
+  const elements = [`VPKGS${index} ${terminal} ${node} 0`];
+  const mutual = R[index].flatMap(
+    (entry, j) => j !== index && entry !== 0 ? [j] : []
+  );
+  if (resistance > 0) {
+    const next = inductance === 0 && mutual.length === 0 ? dieNode : `PKGR${index}`;
+    elements.push(`RPKG${index} ${node} ${next} ${spiceNumber(resistance)}`);
+    node = next;
+  }
+  for (const [position, j] of mutual.entries()) {
+    const isLast = position === mutual.length - 1;
+    const next = inductance === 0 && isLast ? dieNode : `PKGR${index}_${j}`;
+    elements.push(
+      `HPKG${index}_${j} ${node} ${next} VPKGS${j} ${spiceNumber(R[index][j])}`
+    );
+    node = next;
+  }
+  if (inductance > 0)
+    elements.push(`LPKG${index} ${node} ${dieNode} ${spiceNumber(inductance)}`);
+  return elements;
+}
 
 // lib/package-branch.ts
-function buildPackageBranch({
-  terminal,
-  packagePinName,
-  matrixPinName,
-  index,
-  terms,
-  coupled,
-  railVoltageVolts
+function requireScalarPackageTerms({
+  physicalPin,
+  resistanceOhms,
+  inductanceHenries,
+  capacitanceFarads
 }) {
-  const elements = [];
-  const matrixIndex = coupled?.activePins.indexOf(matrixPinName);
-  let boardSpiceNode = terminal;
-  let seriesEndSpiceNode = terminal;
-  let resistanceOhms;
-  let capacitanceFarads = 0;
-  if (coupled && matrixIndex !== void 0 && matrixIndex >= 0) {
-    if (matrixPinName !== packagePinName) {
-      boardSpiceNode = `PKGM${index}`;
-      elements.push(`VPKGM${index} ${terminal} ${boardSpiceNode} 0`);
-    }
-    seriesEndSpiceNode = `PKGD${matrixIndex}`;
-    resistanceOhms = coupled.R[matrixIndex][matrixIndex];
-  } else {
-    if (!terms || terms.resistanceOhms === null || terms.inductanceHenries === null || terms.capacitanceFarads === null || ![
-      terms.resistanceOhms,
-      terms.inductanceHenries,
-      terms.capacitanceFarads
-    ].every((value) => Number.isFinite(value) && value >= 0))
-      throw new IbisError(
-        "invalid_package",
-        `${packagePinName}: complete nonnegative vendor package R/L/C required`
-      );
-    const { inductanceHenries } = terms;
-    resistanceOhms = terms.resistanceOhms;
-    capacitanceFarads = terms.capacitanceFarads;
-    let prefix = `PKG`;
-    if (coupled) prefix = `PKGU`;
-    if (resistanceOhms > 0) {
-      seriesEndSpiceNode = `${prefix}R${index}`;
-      elements.push(
-        `R${prefix}${index} ${terminal} ${seriesEndSpiceNode} ${resistanceOhms}`
-      );
-    }
-    if (inductanceHenries > 0) {
-      const nextSpiceNode = `${prefix}L${index}`;
-      elements.push(
-        `L${prefix}${index} ${seriesEndSpiceNode} ${nextSpiceNode} ${inductanceHenries}`
-      );
-      seriesEndSpiceNode = nextSpiceNode;
-    }
-  }
-  let dieSpiceNode = seriesEndSpiceNode;
-  if (railVoltageVolts !== void 0 && resistanceOhms > 0) {
-    dieSpiceNode = `DIE${index}`;
-    elements.push(
-      `VDIE${index} ${dieSpiceNode} 0 ${railVoltageVolts}`,
-      `VPKG${index} ${seriesEndSpiceNode} ${dieSpiceNode} 0`
+  if (resistanceOhms === null || inductanceHenries === null || capacitanceFarads === null || [resistanceOhms, inductanceHenries, capacitanceFarads].some(
+    (term) => term < 0 || !Number.isFinite(term)
+  )) {
+    throw new IbisError(
+      "invalid_package",
+      `${physicalPin}: complete nonnegative vendor package R/L/C required`
     );
   }
-  return {
-    boardSpiceNode,
-    seriesEndSpiceNode,
-    dieSpiceNode,
-    capacitanceFarads,
-    elements
-  };
+  return { resistanceOhms, inductanceHenries, capacitanceFarads };
+}
+function buildScalarPackageBranch({
+  boardSpiceNode,
+  dieSpiceNode,
+  index,
+  prefix = "PKG",
+  terms
+}) {
+  const { resistanceOhms, inductanceHenries } = terms;
+  const elements = [];
+  let node = boardSpiceNode;
+  if (resistanceOhms > 0) {
+    node = inductanceHenries === 0 && dieSpiceNode || `${prefix}R${index}`;
+    elements.push(
+      `R${prefix}${index} ${boardSpiceNode} ${node} ${spiceNumber(resistanceOhms)}`
+    );
+  }
+  if (inductanceHenries > 0) {
+    const end = dieSpiceNode || `${prefix}L${index}`;
+    elements.push(
+      `L${prefix}${index} ${node} ${end} ${spiceNumber(inductanceHenries)}`
+    );
+    node = end;
+  }
+  return { boardSpiceNode, dieSpiceNode: node, elements };
 }
 
 // lib/package-rails.ts
-var DIE_VOLTAGE_TOLERANCE_VOLTS = 1e-8;
-function resolveRailReferences({
-  pins,
-  buffers,
-  corner
-}) {
-  const rails = /* @__PURE__ */ new Map();
-  for (const [index, pin] of pins.entries()) {
-    const buffer = buffers[index].buffer;
-    const voltages = resolveIbisReferenceVoltages({ buffer, corner });
-    for (const role of Object.keys(pin.references)) {
-      const port = pin.references[role];
-      if (port === void 0) continue;
-      let voltageVolts;
-      if (role !== "external") voltageVolts = voltages[role];
-      if (role === "external" && buffer.externalReference !== void 0)
-        voltageVolts = cornerValue(
-          buffer.externalReference,
-          corner,
-          "external reference"
-        );
-      const previous = rails.get(port);
-      if (previous?.voltageVolts !== void 0 && voltageVolts !== void 0 && Math.abs(previous.voltageVolts - voltageVolts) > DIE_VOLTAGE_TOLERANCE_VOLTS) {
-        throw new IbisError(
-          "invalid_package",
-          `${port}: incompatible IBIS die voltages`
-        );
-      }
-      if (voltageVolts === void 0) voltageVolts = previous?.voltageVolts;
-      rails.set(port, {
-        voltageVolts,
-        pulldownPorts: /* @__PURE__ */ new Set([
-          ...previous?.pulldownPorts || [],
-          pin.references.pulldown
-        ])
-      });
+function resolvePackageGroundPorts(pins) {
+  const grounds = /* @__PURE__ */ new Map();
+  for (const { port, references } of pins) {
+    for (const terminal of [port, ...Object.values(references)]) {
+      const previous = grounds.get(terminal);
+      if (previous) previous.add(references.pulldown);
+      else grounds.set(terminal, /* @__PURE__ */ new Set([references.pulldown]));
     }
   }
-  return rails;
+  return grounds;
 }
 
 // lib/package-network.ts
 function resolvePackageTerminals(mapping, mappedPins) {
-  return Object.entries(mapping).map(([boardSpiceNode, port]) => {
-    const terms = mappedPins.find((pin) => pin.port === port);
-    return {
-      boardSpiceNode,
-      port,
-      packagePinName: terms?.physicalPin,
-      terms
-    };
+  return Object.entries(mapping).flatMap(([boardSpiceNode, port], index) => {
+    const terminal = { boardSpiceNode, port, index };
+    const matches = mappedPins.filter((pin) => pin.port === port);
+    return matches.length ? matches.map((terms) => ({ ...terminal, terms })) : [terminal];
   });
+}
+function resolveBoardPortAliases({
+  terminals,
+  coupled
+}) {
+  const representatives = /* @__PURE__ */ new Map();
+  const aliases = /* @__PURE__ */ Object.create(null);
+  if (!coupled) return aliases;
+  for (const { port, terms } of terminals) {
+    if (terms && coupled.activePins.includes(terms.physicalPin))
+      representatives.set(terms.physicalPin, port);
+  }
+  for (const { port, terms } of terminals) {
+    if (!terms) continue;
+    const representative = coupled.mergedPins[terms.physicalPin];
+    if (representative === void 0) continue;
+    const canonical = representatives.get(representative) || port;
+    representatives.set(representative, canonical);
+    const oldRoot = getCanonicalPort({ aliases, port });
+    const newRoot = getCanonicalPort({ aliases, port: canonical });
+    if (oldRoot !== newRoot) aliases[oldRoot] = newRoot;
+  }
+  return Object.fromEntries(
+    Object.keys(aliases).map((port) => [
+      port,
+      getCanonicalPort({ aliases, port })
+    ])
+  );
+}
+function getCanonicalPort({
+  aliases,
+  port
+}) {
+  let root = port;
+  while (Object.hasOwn(aliases, root)) root = aliases[root];
+  return root;
+}
+function resolveCapacitanceGround(nodes) {
+  const unique = new Set(nodes);
+  if (unique.size === 1) return [...unique][0] || "0";
+  return "0";
 }
 function buildPackageNetwork({
   terminals,
   coupled,
-  component,
-  references
+  pins
 }) {
-  const branches = /* @__PURE__ */ new Map();
-  const dieSpiceNodes = /* @__PURE__ */ new Map();
+  const boardPortAliases = resolveBoardPortAliases({ terminals, coupled });
+  const boardNodes = /* @__PURE__ */ new Map();
+  const terminalsByPort = /* @__PURE__ */ new Map();
+  for (const terminal of terminals) {
+    const port = getCanonicalPort({
+      aliases: boardPortAliases,
+      port: terminal.port
+    });
+    const group = terminalsByPort.get(port);
+    if (group) group.push(terminal);
+    else terminalsByPort.set(port, [terminal]);
+    if (port === terminal.port) boardNodes.set(port, terminal.boardSpiceNode);
+  }
+  for (const [alias, canonical] of Object.entries(boardPortAliases)) {
+    const node = boardNodes.get(canonical);
+    if (node !== void 0) boardNodes.set(alias, node);
+  }
   const elements = [];
-  const mergedVoltages = /* @__PURE__ */ new Map();
-  for (const [index, terminal] of terminals.entries()) {
-    const { packagePinName, port, boardSpiceNode } = terminal;
-    if (packagePinName === void 0) {
-      dieSpiceNodes.set(port, boardSpiceNode);
-      continue;
+  const dieSpiceNodes = /* @__PURE__ */ new Map();
+  const matrixBranches = /* @__PURE__ */ new Map();
+  const shunts = [];
+  let nextIndex = terminals.reduce(
+    (count, entry) => Math.max(count, entry.index + 1),
+    0
+  );
+  for (const [port, group] of terminalsByPort) {
+    const boardSpiceNode = boardNodes.get(port);
+    if (boardSpiceNode === void 0)
+      throw new IbisError(
+        "invalid_package",
+        `${port}: missing canonical board terminal`
+      );
+    const leads = group.flatMap(({ terms }) => {
+      if (!terms) return [];
+      const name = coupled?.mergedPins[terms.physicalPin] || terms.physicalPin;
+      if (coupled?.activePins.includes(name)) {
+        return [{ name, terms, matrixIndex: coupled.activePins.indexOf(name) }];
+      }
+      return [{ name, terms, matrixIndex: -1 }];
+    });
+    const uniqueLeads = [
+      ...new Map(leads.map((lead) => [lead.name, lead])).values()
+    ];
+    const branches = uniqueLeads.map(
+      ({ name, terms, matrixIndex }, position) => {
+        const index = position === 0 ? group[0].index : nextIndex++;
+        if (coupled && matrixIndex >= 0)
+          return {
+            name,
+            matrixIndex,
+            index,
+            terms: {
+              resistanceOhms: coupled.R[matrixIndex][matrixIndex],
+              inductanceHenries: coupled.L[matrixIndex][matrixIndex],
+              capacitanceFarads: 0
+            }
+          };
+        return {
+          name,
+          matrixIndex,
+          index,
+          terms: requireScalarPackageTerms(terms)
+        };
+      }
+    );
+    const lossless = branches.some(
+      ({ terms }) => terms.resistanceOhms === 0 && terms.inductanceHenries === 0
+    );
+    const first = branches[0];
+    let sharedDieNode;
+    if (lossless) sharedDieNode = boardSpiceNode;
+    else if (first && first.matrixIndex >= 0)
+      sharedDieNode = `PKGD${first.matrixIndex}`;
+    else if (branches.length > 1) sharedDieNode = `PKGB${first.index}`;
+    let dieNode = sharedDieNode || boardSpiceNode;
+    for (const { name, terms, matrixIndex, index } of branches) {
+      if (matrixIndex >= 0) {
+        matrixBranches.set(name, {
+          boardSpiceNode,
+          dieSpiceNode: dieNode,
+          elements: []
+        });
+        continue;
+      }
+      const branch = buildScalarPackageBranch({
+        boardSpiceNode,
+        dieSpiceNode: sharedDieNode,
+        index,
+        prefix: coupled ? "PKGU" : "PKG",
+        terms
+      });
+      dieNode = branch.dieSpiceNode;
+      elements.push(...branch.elements);
+      if (terms.capacitanceFarads > 0)
+        shunts.push({
+          index,
+          port,
+          node: boardSpiceNode,
+          farads: terms.capacitanceFarads
+        });
     }
-    const matrixPinName = coupled?.mergedPins[packagePinName] || packagePinName;
-    const railVoltageVolts = references.get(port)?.voltageVolts;
-    const previous = mergedVoltages.get(matrixPinName);
-    if (railVoltageVolts !== void 0) {
-      if (previous !== void 0 && Math.abs(previous - railVoltageVolts) > DIE_VOLTAGE_TOLERANCE_VOLTS)
+    for (const terminal of group) dieSpiceNodes.set(terminal.port, dieNode);
+  }
+  const groundPorts = resolvePackageGroundPorts(pins);
+  const prefix = coupled ? "CPKGU" : "CPKG";
+  for (const { index, port, node, farads } of shunts) {
+    const ground = resolveCapacitanceGround(
+      [...groundPorts.get(port) || []].map((port2) => boardNodes.get(port2))
+    );
+    if (node !== ground)
+      elements.push(
+        `${prefix}${index} ${node} ${ground} ${spiceNumber(farads)}`
+      );
+  }
+  if (coupled) {
+    const matrix = coupled.activePins.map((pin) => {
+      const branch = matrixBranches.get(pin);
+      if (!branch)
         throw new IbisError(
           "invalid_package",
-          `${component.name}: incompatible die voltages on merged package pin ${matrixPinName}`
+          `${pin}: missing package matrix branch`
         );
-      mergedVoltages.set(matrixPinName, railVoltageVolts);
-    }
-    if (branches.has(matrixPinName)) continue;
-    const canonicalTerminal = terminals.find(
-      (entry) => entry.packagePinName === matrixPinName
-    );
-    const branch = buildPackageBranch({
-      terminal: canonicalTerminal?.boardSpiceNode || boardSpiceNode,
-      packagePinName: canonicalTerminal?.packagePinName || packagePinName,
-      index,
-      matrixPinName,
-      terms: canonicalTerminal?.terms || terminal.terms,
-      coupled,
-      railVoltageVolts
+      return branch;
     });
-    branches.set(matrixPinName, branch);
-    elements.push(...branch.elements);
-  }
-  for (const { port, packagePinName } of terminals) {
-    if (packagePinName === void 0) continue;
-    const branch = branches.get(
-      coupled?.mergedPins[packagePinName] || packagePinName
-    );
-    if (!branch)
-      throw new IbisError(
-        "invalid_package",
-        `${packagePinName}: missing package branch`
-      );
-    dieSpiceNodes.set(port, branch.dieSpiceNode);
-  }
-  return { branches, dieSpiceNodes, elements };
-}
-function resolveCapacitanceGround(groundSpiceNodes) {
-  const nodes = new Set(groundSpiceNodes);
-  const [groundSpiceNode] = nodes;
-  if (nodes.size === 1 && groundSpiceNode !== void 0) return groundSpiceNode;
-  return "0";
-}
-function buildPackageCapacitances({
-  terminals,
-  network,
-  pins,
-  coupled,
-  railReferences
-}) {
-  const { dieSpiceNodes, branches } = network;
-  const ground = resolveCapacitanceGround(
-    pins.map((pin) => dieSpiceNodes.get(pin.references.pulldown))
-  );
-  const elements = [];
-  for (const [index, { packagePinName, port }] of terminals.entries()) {
-    if (packagePinName === void 0) continue;
-    const branch = branches.get(packagePinName);
-    if (!branch || branch.capacitanceFarads === 0) continue;
-    const signalPin = pins.find((pin) => pin.port === port);
-    const pulldownPorts = railReferences.get(port)?.pulldownPorts;
-    let reference = ground;
-    if (signalPin)
-      reference = resolveCapacitanceGround([
-        dieSpiceNodes.get(signalPin.references.pulldown)
-      ]);
-    if (pulldownPorts)
-      reference = resolveCapacitanceGround(
-        [...pulldownPorts].map((id) => dieSpiceNodes.get(id))
-      );
-    let prefix = "CPKG";
-    if (coupled) prefix = "CPKGU";
-    const halfCapacitanceFarads = branch.capacitanceFarads / PI_SECTION_SHUNT_COUNT;
+    const grounds = pins.map((pin) => pin.references.pulldown);
     elements.push(
-      `${prefix}${index}a ${branch.boardSpiceNode} ${reference} ${halfCapacitanceFarads}`,
-      `${prefix}${index}b ${branch.seriesEndSpiceNode} ${reference} ${halfCapacitanceFarads}`
+      ...buildCoupledPackageSpiceElements({
+        matrices: coupled,
+        terminals: matrix.map((branch) => branch.boardSpiceNode),
+        die: matrix.map((branch) => branch.dieSpiceNode),
+        ground: resolveCapacitanceGround(
+          grounds.map((port) => dieSpiceNodes.get(port))
+        ),
+        boardGround: resolveCapacitanceGround(
+          grounds.map((port) => boardNodes.get(port))
+        )
+      })
     );
   }
-  if (!coupled) return elements;
-  const matrixBranches = coupled.activePins.map((pin) => {
-    const branch = branches.get(pin);
-    if (!branch)
-      throw new IbisError(
-        "invalid_package",
-        `${pin}: missing package matrix branch`
-      );
-    return branch;
-  });
-  return [
-    ...elements,
-    ...buildCoupledPackageSpiceElements({
-      matrices: coupled,
-      terminals: matrixBranches.map((branch) => branch.boardSpiceNode),
-      die: matrixBranches.map((branch) => branch.seriesEndSpiceNode),
-      ground
-    })
-  ];
+  return { dieSpiceNodes, elements, boardPortAliases };
 }
 
 // lib/package-conversion.ts
-var PACKAGE_WARNING = "Vendor package parasitics applied. Die voltage sources bias rail branches with DC resistance.";
+var PACKAGE_WARNING = "Vendor package parasitics applied.";
 var COUPLED_PACKAGE_WARNING = [
   "Coupled package: zero series current and floating capacitance at unused pins.",
   "One lumped pi section represents each matrix pin.",
   "Other pins use [Pin] or [Package] values, or share the branch for a merged rail bus."
 ].join(" ");
 var PACKAGE_OMISSION = "Vendor package excluded by explicit packagePolicy=omit";
-function usesSignalSeriesOnly({
+function usesInlineScalarPackage({
   coupledModel,
   mappedPins
 }) {
-  if (coupledModel) return false;
-  return mappedPins.every(
-    ({ role, resistanceOhms, inductanceHenries, capacitanceFarads }) => {
-      if (capacitanceFarads !== 0) return false;
-      if (role === "reference")
-        return resistanceOhms === 0 && inductanceHenries === 0;
-      return resistanceOhms !== null && Number.isFinite(resistanceOhms) && resistanceOhms >= 0 && inductanceHenries !== null && Number.isFinite(inductanceHenries) && inductanceHenries >= 0;
-    }
+  return coupledModel === void 0 && mappedPins.every(
+    ({ role, resistanceOhms, inductanceHenries, capacitanceFarads }) => role === "signal" || resistanceOhms === 0 && inductanceHenries === 0 && capacitanceFarads === 0
   );
 }
 function buildExtendedPackage({
@@ -664,8 +658,6 @@ function buildExtendedPackage({
   metadata,
   component,
   document,
-  buffers,
-  corner,
   sourceLabel
 }) {
   const terminals = resolvePackageTerminals(
@@ -673,46 +665,31 @@ function buildExtendedPackage({
     metadata.packageData.mappedPins
   );
   const physicalPins = terminals.flatMap(
-    ({ packagePinName }) => packagePinName === void 0 ? [] : [packagePinName]
+    ({ terms }) => terms ? [terms.physicalPin] : []
   );
   const coupled = resolveCoupledPackage({
     document,
     component,
     pins: physicalPins
   });
-  const railReferences = resolveRailReferences({
-    pins: metadata.pins,
-    buffers,
-    corner
-  });
   const network = buildPackageNetwork({
     terminals,
     coupled,
-    component,
-    references: railReferences
+    pins: metadata.pins
   });
-  const elements = [
-    ...network.elements,
-    ...buildPackageCapacitances({
-      terminals,
-      network,
-      pins: metadata.pins,
-      coupled,
-      railReferences
-    })
-  ];
   const result = {
     dieNodes: network.dieSpiceNodes,
-    elements,
-    data: metadata.packageData,
+    elements: network.elements,
+    packageData: metadata.packageData,
     warnings: [PACKAGE_WARNING]
   };
   if (!coupled) return result;
   return {
     ...result,
-    data: {
+    packageData: {
       ...metadata.packageData,
       matrices: coupled,
+      ...Object.keys(network.boardPortAliases).length ? { boardPortAliases: network.boardPortAliases } : {},
       unusedPinPolicy: "open-series-floating-capacitance",
       mappedPins: metadata.packageData.mappedPins.map((pin) => {
         const index = coupled.activePins.indexOf(
@@ -739,11 +716,318 @@ function buildExtendedPackage({
     ]
   };
 }
+function resolveScalarPackageData({
+  component,
+  definition,
+  mapped,
+  rails,
+  signalPorts
+}) {
+  const cornerIndex = { typical: 0, minimum: 1, maximum: 2 }[definition.corner];
+  return {
+    coupledModel: component.coupledPackage,
+    mappedPins: mapped.filter(([, port]) => rails.includes(port) || signalPorts.has(port)).map(([physicalPin, port]) => {
+      const pin = component.pins[physicalPin];
+      return {
+        physicalPin,
+        port,
+        role: signalPorts.has(port) ? "signal" : "reference",
+        resistanceOhms: getPackageTerm({
+          pin,
+          component,
+          field: "resistance",
+          cornerIndex
+        }),
+        inductanceHenries: getPackageTerm({
+          pin,
+          component,
+          field: "inductance",
+          cornerIndex
+        }),
+        capacitanceFarads: getPackageTerm({
+          pin,
+          component,
+          field: "capacitance",
+          cornerIndex
+        })
+      };
+    })
+  };
+}
+function getPackageTerm({
+  pin,
+  component,
+  field,
+  cornerIndex
+}) {
+  if (pin[field] !== void 0) return pin[field];
+  const selected = component.package[field]?.[cornerIndex];
+  return selected === void 0 ? null : selected;
+}
+
+// lib/logical-schedule.ts
+function ibisTimeSeconds(time, allowZero = false) {
+  const result = typeof time === "number" ? time * 1e-3 : /^\s*0(?:\.0*)?\s*(s|ms|us|ns|ps)\s*$/i.test(time) ? 0 : seconds(time);
+  if (!Number.isFinite(result) || result < 0 || !allowZero && result === 0)
+    throw new IbisError(
+      "invalid_time",
+      `Expected ${allowZero ? "nonnegative" : "positive"} time: ${time}`
+    );
+  return result;
+}
+function logicalBitSchedule(stimulus, ...[durationInput, polarity = "non-inverting"]) {
+  if (stimulus.pattern?.type !== "bits" || !/^[01]+$/.test(stimulus.pattern.bits) || typeof stimulus.pattern.repeat !== "boolean")
+    throw new IbisError(
+      "invalid_pattern",
+      "A nonempty binary bits pattern and explicit repeat boolean are required"
+    );
+  if (![0, 1].includes(stimulus.initialState) || stimulus.inverted !== void 0 && typeof stimulus.inverted !== "boolean")
+    throw new IbisError(
+      "invalid_stimulus",
+      "initialState must be 0 or 1 and inverted must be boolean"
+    );
+  const unitInterval = ibisTimeSeconds(stimulus.unitInterval), startTime = ibisTimeSeconds(stimulus.startTime, true), duration = ibisTimeSeconds(durationInput);
+  if (startTime >= duration)
+    throw new IbisError(
+      "invalid_stimulus",
+      "Stimulus startTime must precede simulation duration"
+    );
+  const intervals = (duration - startTime) / unitInterval;
+  const count = Math.max(
+    1,
+    Math.ceil(intervals - Math.max(1, intervals) * Number.EPSILON * 8)
+  );
+  if (!Number.isFinite(intervals) || count > 1e5)
+    throw new IbisError(
+      "stimulus_too_long",
+      "Stimulus exceeds 100000 bit intervals"
+    );
+  if (!stimulus.pattern.repeat && count > stimulus.pattern.bits.length)
+    throw new IbisError(
+      "uncovered_stimulus",
+      "Nonrepeating bits must cover the simulation duration"
+    );
+  const invert = Number(Boolean(stimulus.inverted)) ^ Number(polarity === "inverting");
+  const initialState = stimulus.initialState ^ invert;
+  let previous = initialState;
+  const transitions = [];
+  for (let i = 0; i < count; i++) {
+    const state = Number(
+      stimulus.pattern.bits[i % stimulus.pattern.bits.length]
+    ) ^ invert;
+    if (state !== previous)
+      transitions.push({ time: startTime + i * unitInterval, state });
+    previous = state;
+  }
+  const schedule = { initialState, transitions, duration };
+  return { ...schedule, sha256: sourceHash(JSON.stringify(schedule)) };
+}
+
+// lib/general-model-input.ts
+function resolveGeneralModel(input, definition) {
+  validateIbisDefinitionSource(definition.source);
+  const hash = sourceHash(input), text = typeof input === "string" ? input : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+    input
+  );
+  if (definition.source.content !== void 0 && sourceHash(definition.source.content) !== hash)
+    throw new IbisError(
+      "source_mismatch",
+      "Resolved inline IBIS bytes differ from the electrical definition"
+    );
+  const expectedInputHash = definition.source.archive ? definition.source.archive.memberSha256 : definition.source.sha256;
+  if (expectedInputHash && hash !== expectedInputHash.toLowerCase())
+    throw new IbisError(
+      "hash_mismatch",
+      "Resolved IBIS bytes do not match the electrical definition's member/direct SHA-256"
+    );
+  if (!["vendor", "omit"].includes(definition.packagePolicy))
+    throw new IbisError(
+      "missing_package_policy",
+      "Select packagePolicy=vendor or omit explicitly"
+    );
+  if (!["typical", "minimum", "maximum"].includes(definition.corner))
+    throw new IbisError("invalid_corner", "Select an explicit IBIS corner");
+  const document = parseIbis(text);
+  const component = document.components[definition.component];
+  if (!component)
+    throw new IbisError(
+      "missing_component",
+      `IBIS component ${definition.component} was not found`
+    );
+  if (component.unsupportedFeatures?.length)
+    throw new IbisError(
+      "unsupported_feature",
+      `${component.name}: [${component.unsupportedFeatures.join("] [")}] is unsupported`
+    );
+  return { hash, document, component };
+}
+function resolveGeneralRun({
+  document,
+  component,
+  definition,
+  run
+}) {
+  const duration = ibisTimeSeconds(run.duration);
+  const mapped = Object.entries(definition.pinMap).sort(
+    ([a], [b]) => a < b ? -1 : a > b ? 1 : 0
+  );
+  if (!mapped.length)
+    throw new IbisError(
+      "missing_pins",
+      "Select physical signal pins and required reference rails"
+    );
+  for (const [pin, port] of mapped)
+    if (!component.pins[pin] || !port)
+      throw new IbisError(
+        "invalid_mapping",
+        `Unknown physical IBIS pin or empty local port: ${pin}`
+      );
+  const signals = mapped.filter(
+    ([pin]) => !["power", "gnd", "nc"].includes(component.pins[pin].model.toLowerCase())
+  );
+  if (!signals.length)
+    throw new IbisError(
+      "missing_pins",
+      "At least one mapped signal pin is required"
+    );
+  if (new Set(signals.map(([, port]) => port)).size !== signals.length)
+    throw new IbisError(
+      "duplicate_pin",
+      "Signal pins must map to distinct local TSX ports"
+    );
+  const signalPorts = new Set(signals.map(([, port]) => port));
+  for (const port of [
+    ...Object.keys(run.pinStates),
+    ...Object.keys(run.stimuli)
+  ])
+    if (!signalPorts.has(port))
+      throw new IbisError(
+        "unknown_run_port",
+        `Run state/stimulus port ${port} is not a modeled signal`
+      );
+  for (const pin of [
+    ...Object.keys(definition.modelSelections || {}),
+    ...Object.keys(definition.references || {})
+  ])
+    if (!signals.some(([physical]) => physical === pin))
+      throw new IbisError(
+        "unknown_signal_pin",
+        `Model selection/reference ${pin} is not a mapped signal pin`
+      );
+  const signalsInRun = signals.map(
+    ([physicalPin, port]) => resolveGeneralSignal({
+      physicalPin,
+      port,
+      document,
+      component,
+      definition,
+      run
+    })
+  );
+  return { mapped, signals, signalPorts, signalsInRun, duration };
+}
+function resolveGeneralSignal({
+  physicalPin,
+  port,
+  document,
+  component,
+  definition,
+  run
+}) {
+  const declaredState = run.pinStates[port];
+  if (!declaredState || !["input", "output"].includes(declaredState.mode) || declaredState.mode === "output" && typeof declaredState.enabled !== "boolean")
+    throw new IbisError(
+      "missing_run_state",
+      `${port}: explicit compatible input/output state is required`
+    );
+  const state = declaredState.mode === "input" ? { mode: "input" } : { mode: "output", enabled: declaredState.enabled };
+  const pin = component.pins[physicalPin], choices = document.selectors[pin.model] || [pin.model];
+  const model = definition.modelSelections?.[physicalPin] === void 0 ? choices.length === 1 ? choices[0] : void 0 : definition.modelSelections[physicalPin];
+  if (!model)
+    throw new IbisError(
+      "ambiguous_selector",
+      `${physicalPin}: choose a buffer from ${choices.join(", ")}`
+    );
+  if (!choices.includes(model))
+    throw new IbisError(
+      "invalid_selection",
+      `${model} is not allowed for pin ${physicalPin}`
+    );
+  const buffer = document.getBuffer(model), stimulus = run.stimuli[port];
+  if (state.mode === "input" && buffer.type === "output")
+    throw new IbisError(
+      "incompatible_run_state",
+      `${port}: output-only model cannot operate as an input`
+    );
+  if (state.mode === "output" && buffer.type === "input")
+    throw new IbisError(
+      "incompatible_run_state",
+      `${port}: input-only model cannot drive output`
+    );
+  if (state.mode === "output" && !state.enabled && !["i/o", "3-state"].includes(buffer.type))
+    throw new IbisError(
+      "unsupported_disable",
+      `${port}: output-only model has no drive-enable capability`
+    );
+  const enabled = state.mode === "output" && state.enabled;
+  if (enabled && !stimulus)
+    throw new IbisError(
+      "missing_stimulus",
+      `${port}: enabled output needs exactly one explicit bit stimulus`
+    );
+  if (!enabled && stimulus)
+    throw new IbisError(
+      "invalid_stimulus",
+      `${port}: input/disabled output cannot have a drive stimulus`
+    );
+  const schedule = stimulus ? logicalBitSchedule(stimulus, run.duration, buffer.polarity) : void 0;
+  const references = resolveIbisReferences({
+    component,
+    pin: physicalPin,
+    pinToSourcePort: definition.pinMap,
+    explicitReferences: definition.references?.[physicalPin],
+    voltageCheck: { buffer, corner: definition.corner }
+  });
+  for (const pair of component.differentialPins.filter(
+    (pair2) => pair2.pin === physicalPin || pair2.invertedPin === physicalPin
+  )) {
+    const delay = pair.delay[{ typical: 0, minimum: 1, maximum: 2 }[definition.corner]];
+    if (delay !== null && delay !== 0)
+      throw new IbisError(
+        "unsupported_diff_delay",
+        `${physicalPin}: nonzero vendor differential pair delay is unsupported`
+      );
+  }
+  const converted = convertIbisBuffer(document, model, {
+    corner: definition.corner,
+    mode: enabled ? "output" : "input",
+    separateReferences: true,
+    externalReference: Boolean(references.external),
+    skipSwitchingWeights: true
+  });
+  const enableControlLevel = state.mode === "output" && buffer.enable ? Number(state.enabled) ^ Number(buffer.enable === "active-low") : void 0;
+  const pinMetadata = {
+    physicalPin,
+    port,
+    model,
+    selector: pin.model,
+    selectorChoices: choices,
+    modelType: buffer.type,
+    polarity: buffer.polarity || "non-inverting",
+    polarityDeclared: buffer.polarity !== void 0,
+    enable: buffer.enable,
+    enableControlLevel,
+    runState: state,
+    references,
+    stimulusHash: schedule?.sha256
+  };
+  return { pinMetadata, converted, schedule };
+}
 
 // lib/switching-tail.ts
 var WAVEFORM_FIXTURE_COUNT = 2;
 var STEADY_STATE_TOLERANCE = 0.01;
-function settledIndex({
+function findSettledIndex({
   deviations,
   limit
 }) {
@@ -751,7 +1035,7 @@ function settledIndex({
   while (index > 0 && deviations[index - 1] <= limit) index--;
   return index;
 }
-function fixtureDeviation({
+function measureFixtureDeviation({
   table,
   timeSeconds
 }) {
@@ -812,7 +1096,7 @@ function findWaveformTailTruncation({
   const deviations = coefficientSamples.map(
     (row) => Math.max(Math.abs(row[1] - pullup), Math.abs(row[2] - pulldown))
   );
-  const index = settledIndex({ deviations, limit: STEADY_STATE_TOLERANCE });
+  const index = findSettledIndex({ deviations, limit: STEADY_STATE_TOLERANCE });
   if (index === coefficientSamples.length) return void 0;
   let timeSeconds = coefficientSamples[index][0];
   const waveforms = buffer.waveforms.filter((waveform) => waveform.kind === edge).slice(0, WAVEFORM_FIXTURE_COUNT);
@@ -825,7 +1109,7 @@ function findWaveformTailTruncation({
   for (const table of tables) {
     const final = table[table.length - 1][1];
     const limit = STEADY_STATE_TOLERANCE * Math.abs(final - table[0][1]);
-    const start = settledIndex({
+    const start = findSettledIndex({
       deviations: table.map((row) => Math.abs(row[1] - final)),
       limit
     });
@@ -855,7 +1139,7 @@ function findWaveformTailTruncation({
         "V_fixture"
       ),
       toleranceVolts: STEADY_STATE_TOLERANCE * Math.abs(table[table.length - 1][1] - table[0][1]),
-      maxDeviationVolts: fixtureDeviation({
+      maxDeviationVolts: measureFixtureDeviation({
         table,
         timeSeconds: cutoffTimeSeconds
       })
@@ -866,6 +1150,20 @@ function findWaveformTailTruncation({
 // lib/switching-coefficients.ts
 var HOLD_STEP_SECONDS = 1e-15;
 var HOLD_STEP_GAP_FRACTION = 1e-6;
+var TIME_ROUNDING_ULPS = 4;
+function isSameTime(a, b) {
+  return Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b)) * Number.EPSILON * TIME_ROUNDING_ULPS;
+}
+function formatSwitchingTimes(samples) {
+  const times = samples.map(([seconds2]) => spiceNumber(seconds2));
+  const endpoint = samples.at(-1)?.[0];
+  if (endpoint !== void 0 && Number(times.at(-1)) !== endpoint && !isSameTime(Number(times.at(-1)), endpoint)) {
+    times[times.length - 1] = String(endpoint);
+  }
+  if (times.some((time, i) => i > 0 && Number(time) <= Number(times[i - 1])))
+    return samples.map(([seconds2]) => String(seconds2));
+  return times;
+}
 function captureEdge({
   coefficients,
   start,
@@ -874,8 +1172,15 @@ function captureEdge({
   const points = [];
   for (const [index, [time, ku, kd]] of coefficients.entries()) {
     const absolute = start + time;
+    const last = points.at(-1);
+    if (isSameTime(absolute, stop)) {
+      if (index > 0 || absolute === stop) {
+        if (last?.[0] !== stop) points.push([stop, ku, kd]);
+        break;
+      }
+    }
     if (absolute > stop) {
-      if (points.at(-1)?.[0] !== stop && index > 0) {
+      if (last && last[0] < stop) {
         const [previousTime, previousKu, previousKd] = coefficients[index - 1];
         const fraction = (stop - start - previousTime) / (time - previousTime);
         points.push([
@@ -886,9 +1191,59 @@ function captureEdge({
       }
       break;
     }
-    if (points.at(-1)?.[0] !== absolute) points.push([absolute, ku, kd]);
+    if (last?.[0] !== absolute) points.push([absolute, ku, kd]);
   }
   return points;
+}
+function getPreEdgeHold(start, precedingTime) {
+  const gap = start - precedingTime;
+  const step = Math.min(HOLD_STEP_SECONDS, gap * HOLD_STEP_GAP_FRACTION);
+  const representableStep = start * Number.EPSILON * TIME_ROUNDING_ULPS;
+  const hold = start - Math.max(step, representableStep);
+  if (hold > precedingTime && hold < start) return hold;
+}
+function appendMeasuredEdge({
+  samples,
+  points,
+  state,
+  bufferName,
+  afterTrimmedTail
+}) {
+  const previous = samples[samples.length - 1];
+  const first = points[0];
+  if (!first) return;
+  const [start] = first;
+  if (start === previous[0]) {
+    if (start === 0) samples.pop();
+    else {
+      const error = Math.max(
+        Math.abs(first[1] - previous[1]),
+        Math.abs(first[2] - previous[2])
+      );
+      const bothSettled = [previous, first].every(
+        ([, ku, kd]) => Math.max(Math.abs(ku - (1 - state)), Math.abs(kd - state)) <= STEADY_STATE_TOLERANCE
+      );
+      if (error <= STEADY_STATE_TOLERANCE || bothSettled) {
+        for (const point of points.slice(1)) samples.push(point);
+        return;
+      }
+      const before = samples[samples.length - 2];
+      const hold = afterTrimmedTail && before && getPreEdgeHold(start, before[0]);
+      if (hold === void 0 || hold === false) {
+        const edge = state === 1 ? "rising" : "falling";
+        throw new IbisError(
+          "unsupported_waveforms",
+          `${bufferName}: ${edge} measured waveform and preceding edge disagree at the same time`
+        );
+      }
+      samples.pop();
+      samples.push([hold, previous[1], previous[2]]);
+    }
+  } else {
+    const hold = getPreEdgeHold(start, previous[0]);
+    if (hold !== void 0) samples.push([hold, previous[1], previous[2]]);
+  }
+  for (const point of points) samples.push(point);
 }
 function scheduleSwitchingCoefficients({
   converted,
@@ -902,7 +1257,9 @@ function scheduleSwitchingCoefficients({
   ];
   const tails = [];
   const edgeSamples = /* @__PURE__ */ new Map();
+  let afterTrimmedTail = false;
   for (const [index, transition] of schedule.transitions.entries()) {
+    if (transition.time > schedule.duration) break;
     const edge = transition.state === 1 ? "rising" : "falling";
     let coefficients = edgeSamples.get(edge) || converted.weights?.[edge];
     if (!coefficients && deriveCoefficients) {
@@ -922,7 +1279,10 @@ function scheduleSwitchingCoefficients({
       );
     }
     const nextTime = schedule.transitions[index + 1]?.time;
-    if (nextTime !== void 0 && transition.time + coefficients[coefficients.length - 1][0] > nextTime) {
+    const stop = nextTime === void 0 ? schedule.duration : Math.min(nextTime, schedule.duration);
+    const end = transition.time + coefficients[coefficients.length - 1][0];
+    const trimsTail = nextTime !== void 0 && nextTime <= schedule.duration && end > nextTime && !isSameTime(end, nextTime);
+    if (trimsTail) {
       let tail = tails.find((entry) => entry.edge === edge);
       if (!tail && buffer.waveforms.filter((waveform) => waveform.kind === edge).length >= 2) {
         tail = findWaveformTailTruncation({
@@ -934,40 +1294,23 @@ function scheduleSwitchingCoefficients({
         });
         if (tail) tails.push(tail);
       }
-      if (!tail || transition.time + tail.cutoffTimeSeconds > nextTime) {
+      const cutoff = tail && transition.time + tail.cutoffTimeSeconds;
+      if (cutoff === void 0 || cutoff > nextTime && !isSameTime(cutoff, nextTime)) {
         throw new IbisError(
           "overlapping_edges",
           `${buffer.name}: actual ${edge} transition has not settled before the next edge (1% fixture swing and 0.01 switching-coefficient tolerances); active-transition interruption is unsupported`
         );
       }
-      const cutoffTime = tail.cutoffTimeSeconds;
-      coefficients = coefficients.filter(([time]) => time <= cutoffTime);
     }
-    const last2 = samples[samples.length - 1];
-    const stitchError = Math.max(
-      Math.abs(coefficients[0][1] - last2[1]),
-      Math.abs(coefficients[0][2] - last2[2])
-    );
-    if (stitchError <= STEADY_STATE_TOLERANCE) {
-      coefficients = [[0, last2[1], last2[2]], ...coefficients.slice(1)];
-    } else if (transition.time > 0) {
-      const gap = transition.time - last2[0];
-      const hold = transition.time - Math.min(HOLD_STEP_SECONDS, gap * HOLD_STEP_GAP_FRACTION);
-      if (hold <= last2[0] || hold >= transition.time) {
-        throw new IbisError(
-          "unsupported_waveforms",
-          `${buffer.name}: ${edge} measured waveform and preceding edge disagree at the same time`
-        );
-      }
-      samples.push([hold, last2[1], last2[2]]);
-    }
-    const points = captureEdge({
-      coefficients,
-      start: transition.time,
-      stop: schedule.duration
+    const points = captureEdge({ coefficients, start: transition.time, stop });
+    appendMeasuredEdge({
+      samples,
+      points,
+      state: transition.state,
+      bufferName: buffer.name,
+      afterTrimmedTail
     });
-    if (samples[samples.length - 1][0] === points[0]?.[0]) samples.pop();
-    for (const point of points) samples.push(point);
+    afterTrimmedTail = trimsTail;
   }
   const last = samples[samples.length - 1];
   if (last[0] < schedule.duration)
@@ -976,62 +1319,6 @@ function scheduleSwitchingCoefficients({
 }
 
 // lib/general.ts
-function ibisTimeSeconds(value, allowZero = false) {
-  const result = typeof value === "number" ? value * 1e-3 : /^\s*0(?:\.0*)?\s*(s|ms|us|ns|ps)\s*$/i.test(value) ? 0 : seconds(value);
-  if (!Number.isFinite(result) || result < 0 || !allowZero && result === 0)
-    throw new IbisError(
-      "invalid_time",
-      `Expected ${allowZero ? "nonnegative" : "positive"} time: ${value}`
-    );
-  return result;
-}
-function logicalBitSchedule(stimulus, durationInput, polarity = "non-inverting") {
-  if (stimulus.pattern?.type !== "bits" || !/^[01]+$/.test(stimulus.pattern.bits) || typeof stimulus.pattern.repeat !== "boolean")
-    throw new IbisError(
-      "invalid_pattern",
-      "A nonempty binary bits pattern and explicit repeat boolean are required"
-    );
-  if (![0, 1].includes(stimulus.initialState) || stimulus.inverted !== void 0 && typeof stimulus.inverted !== "boolean")
-    throw new IbisError(
-      "invalid_stimulus",
-      "initialState must be 0 or 1 and inverted must be boolean"
-    );
-  const unitInterval = ibisTimeSeconds(stimulus.unitInterval), startTime = ibisTimeSeconds(stimulus.startTime, true), duration = ibisTimeSeconds(durationInput);
-  if (startTime >= duration)
-    throw new IbisError(
-      "invalid_stimulus",
-      "Stimulus startTime must precede simulation duration"
-    );
-  const intervals = (duration - startTime) / unitInterval;
-  const count = Math.max(
-    1,
-    Math.ceil(intervals - Math.max(1, intervals) * Number.EPSILON * 8)
-  );
-  if (!Number.isFinite(intervals) || count > 1e5)
-    throw new IbisError(
-      "stimulus_too_long",
-      "Stimulus exceeds 100000 bit intervals"
-    );
-  if (!stimulus.pattern.repeat && count > stimulus.pattern.bits.length)
-    throw new IbisError(
-      "uncovered_stimulus",
-      "Nonrepeating bits must cover the simulation duration"
-    );
-  const invert = Number(Boolean(stimulus.inverted)) ^ Number(polarity === "inverting");
-  const initialState = stimulus.initialState ^ invert;
-  let previous = initialState;
-  const transitions = [];
-  for (let i = 0; i < count; i++) {
-    const state = Number(
-      stimulus.pattern.bits[i % stimulus.pattern.bits.length]
-    ) ^ invert;
-    if (state !== previous)
-      transitions.push({ time: startTime + i * unitInterval, state });
-    previous = state;
-  }
-  const value = { initialState, transitions, duration };
-  return { ...value, sha256: sourceHash(JSON.stringify(value)) };
-}
 function bitWeights(converted, schedule) {
   return scheduleSwitchingCoefficients({
     converted,
@@ -1042,208 +1329,30 @@ function bitWeights(converted, schedule) {
 }
 var SETTLED_TAIL_WARNING = [
   "IBIS inactive tails truncated only after all remaining two-fixture voltages and switching coefficients settle",
-  "within the recorded 1% tolerances; cutoff coefficients are held, without time compression or",
-  "initial-delay removal"
+  "within the recorded 1% tolerances. Measured samples are retained up to the next transition."
 ].join(" ");
-function convertIbisModelToSpice(input, definition, run, options = {}) {
-  validateIbisDefinitionSource(definition.source);
-  const hash = sourceHash(input), text = typeof input === "string" ? input : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-    input
-  );
-  if (definition.source.content !== void 0 && sourceHash(definition.source.content) !== hash)
-    throw new IbisError(
-      "source_mismatch",
-      "Resolved inline IBIS bytes differ from the electrical definition"
-    );
-  const expectedInputHash = definition.source.archive ? definition.source.archive.memberSha256 : definition.source.sha256;
-  if (expectedInputHash && hash !== expectedInputHash.toLowerCase())
-    throw new IbisError(
-      "hash_mismatch",
-      "Resolved IBIS bytes do not match the electrical definition's member/direct SHA-256"
-    );
-  if (!["vendor", "omit"].includes(definition.packagePolicy))
-    throw new IbisError(
-      "missing_package_policy",
-      "Select packagePolicy=vendor or omit explicitly"
-    );
-  if (!["typical", "minimum", "maximum"].includes(definition.corner))
-    throw new IbisError("invalid_corner", "Select an explicit IBIS corner");
-  const duration = ibisTimeSeconds(run.duration), document = parseIbis(text), component = document.components[definition.component];
-  if (!component)
-    throw new IbisError(
-      "missing_component",
-      `IBIS component ${definition.component} was not found`
-    );
-  if (component.unsupportedFeatures?.length)
-    throw new IbisError(
-      "unsupported_feature",
-      `${component.name}: [${component.unsupportedFeatures.join("] [")}] is unsupported`
-    );
-  const mapped = Object.entries(definition.pinMap).sort(
-    ([a], [b]) => a < b ? -1 : a > b ? 1 : 0
-  );
-  if (!mapped.length)
-    throw new IbisError(
-      "missing_pins",
-      "Select physical signal pins and required reference rails"
-    );
-  for (const [pin, port] of mapped)
-    if (!component.pins[pin] || !port)
-      throw new IbisError(
-        "invalid_mapping",
-        `Unknown physical IBIS pin or empty local port: ${pin}`
-      );
-  const signals = mapped.filter(
-    ([pin]) => !["power", "gnd", "nc"].includes(component.pins[pin].model.toLowerCase())
-  );
-  if (!signals.length)
-    throw new IbisError(
-      "missing_pins",
-      "At least one mapped signal pin is required"
-    );
-  if (new Set(signals.map(([, port]) => port)).size !== signals.length)
-    throw new IbisError(
-      "duplicate_pin",
-      "Signal pins must map to distinct local TSX ports"
-    );
-  const signalPorts = new Set(signals.map(([, port]) => port));
-  for (const port of [
-    ...Object.keys(run.pinStates),
-    ...Object.keys(run.stimuli)
-  ])
-    if (!signalPorts.has(port))
-      throw new IbisError(
-        "unknown_run_port",
-        `Run state/stimulus port ${port} is not a modeled signal`
-      );
-  for (const pin of [
-    ...Object.keys(definition.modelSelections || {}),
-    ...Object.keys(definition.references || {})
-  ])
-    if (!signals.some(([physical]) => physical === pin))
-      throw new IbisError(
-        "unknown_signal_pin",
-        `Model selection/reference ${pin} is not a mapped signal pin`
-      );
-  const pins = [];
-  const convertedBuffers = [];
-  const schedules = [];
-  for (const [physicalPin, port] of signals) {
-    const declaredState = run.pinStates[port];
-    if (!declaredState || !["input", "output"].includes(declaredState.mode) || declaredState.mode === "output" && typeof declaredState.enabled !== "boolean")
-      throw new IbisError(
-        "missing_run_state",
-        `${port}: explicit compatible input/output state is required`
-      );
-    const state = declaredState.mode === "input" ? { mode: "input" } : { mode: "output", enabled: declaredState.enabled };
-    const pin = component.pins[physicalPin], choices = document.selectors[pin.model] || [pin.model];
-    const model = definition.modelSelections?.[physicalPin] === void 0 ? choices.length === 1 ? choices[0] : void 0 : definition.modelSelections[physicalPin];
-    if (!model)
-      throw new IbisError(
-        "ambiguous_selector",
-        `${physicalPin}: choose a buffer from ${choices.join(", ")}`
-      );
-    if (!choices.includes(model))
-      throw new IbisError(
-        "invalid_selection",
-        `${model} is not allowed for pin ${physicalPin}`
-      );
-    const buffer = document.getBuffer(model), stimulus = run.stimuli[port];
-    if (state.mode === "input" && buffer.type === "output")
-      throw new IbisError(
-        "incompatible_run_state",
-        `${port}: output-only model cannot operate as an input`
-      );
-    if (state.mode === "output" && buffer.type === "input")
-      throw new IbisError(
-        "incompatible_run_state",
-        `${port}: input-only model cannot drive output`
-      );
-    if (state.mode === "output" && !state.enabled && !["i/o", "3-state"].includes(buffer.type))
-      throw new IbisError(
-        "unsupported_disable",
-        `${port}: output-only model has no drive-enable capability`
-      );
-    const enabled = state.mode === "output" && state.enabled;
-    if (enabled && !stimulus)
-      throw new IbisError(
-        "missing_stimulus",
-        `${port}: enabled output needs exactly one explicit bit stimulus`
-      );
-    if (!enabled && stimulus)
-      throw new IbisError(
-        "invalid_stimulus",
-        `${port}: input/disabled output cannot have a drive stimulus`
-      );
-    const schedule = stimulus ? logicalBitSchedule(stimulus, run.duration, buffer.polarity) : void 0;
-    const references = resolveIbisReferences({
-      component,
-      pin: physicalPin,
-      pinToSourcePort: definition.pinMap,
-      explicitReferences: definition.references?.[physicalPin],
-      voltageCheck: { buffer, corner: definition.corner }
-    });
-    for (const pair of component.differentialPins.filter(
-      (pair2) => pair2.pin === physicalPin || pair2.invertedPin === physicalPin
-    )) {
-      const delay = pair.delay[{ typical: 0, minimum: 1, maximum: 2 }[definition.corner]];
-      if (delay !== null && delay !== 0)
-        throw new IbisError(
-          "unsupported_diff_delay",
-          `${physicalPin}: nonzero vendor differential pair delay is unsupported`
-        );
-    }
-    convertedBuffers.push(
-      convertIbisBuffer(document, model, {
-        corner: definition.corner,
-        mode: enabled ? "output" : "input",
-        separateReferences: true,
-        externalReference: Boolean(references.external),
-        skipSwitchingWeights: true
-      })
-    );
-    schedules.push(schedule);
-    const enableControlLevel = state.mode === "output" && buffer.enable ? Number(state.enabled) ^ Number(buffer.enable === "active-low") : void 0;
-    pins.push({
-      physicalPin,
-      port,
-      model,
-      selector: pin.model,
-      selectorChoices: choices,
-      modelType: buffer.type,
-      polarity: buffer.polarity || "non-inverting",
-      polarityDeclared: buffer.polarity !== void 0,
-      enable: buffer.enable,
-      enableControlLevel,
-      runState: state,
-      references,
-      stimulusHash: schedule?.sha256
-    });
-  }
+function convertIbisModelToSpice(input, ...args) {
+  const { definition, run, sourceLabel } = args.length === 1 ? args[0] : { definition: args[0], run: args[1], sourceLabel: args[2]?.sourceLabel };
+  const { hash, document, component } = resolveGeneralModel(input, definition);
+  const { duration, mapped, signals, signalPorts, signalsInRun } = resolveGeneralRun({
+    document,
+    component,
+    definition,
+    run
+  });
+  const pins = signalsInRun.map(({ pinMetadata }) => pinMetadata);
+  const schedules = signalsInRun.map(({ schedule }) => schedule);
   const rails = [
     ...new Set(pins.flatMap((pin) => Object.values(pin.references)))
   ].sort();
   const omissions = definition.packagePolicy === "omit" ? [PACKAGE_OMISSION] : [];
-  const cornerIndex = { typical: 0, minimum: 1, maximum: 2 }[definition.corner];
-  const packageData = {
-    coupledModel: component.coupledPackage,
-    mappedPins: mapped.filter(([, port]) => rails.includes(port) || signalPorts.has(port)).map(([physicalPin, port]) => {
-      const pin = component.pins[physicalPin];
-      const value = (field) => {
-        if (pin[field] !== void 0) return pin[field];
-        const selected = component.package[field]?.[cornerIndex];
-        return selected === void 0 ? null : selected;
-      };
-      return {
-        physicalPin,
-        port,
-        role: signalPorts.has(port) ? "signal" : "reference",
-        resistanceOhms: value("resistance"),
-        inductanceHenries: value("inductance"),
-        capacitanceFarads: value("capacitance")
-      };
-    })
-  };
+  const packageData = resolveScalarPackageData({
+    component,
+    definition,
+    mapped,
+    rails,
+    signalPorts
+  });
   const metadata = {
     converterVersion: CONVERTER_VERSION,
     sourceSha256: hash,
@@ -1265,46 +1374,65 @@ function convertIbisModelToSpice(input, definition, run, options = {}) {
   rails.forEach((port, i) => {
     mapping[`REF${i}`] = port;
   });
-  const usesExtendedPackage = definition.packagePolicy === "vendor" && !usesSignalSeriesOnly(packageData);
-  const identityMetadata = usesExtendedPackage ? { ...metadata, packagePolicy: "omit", omissions: [PACKAGE_OMISSION] } : metadata;
-  const name = `IBIS_${sourceHash(JSON.stringify([identityMetadata, schedules, duration])).slice(0, 20)}`;
+  const usesExtendedPackage = definition.packagePolicy === "vendor" && !usesInlineScalarPackage(packageData);
+  const identity = definition.corner === "typical" ? [metadata, schedules, duration] : [metadata, schedules, duration, definition.corner];
+  const name = `IBIS_${sourceHash(JSON.stringify(identity)).slice(0, 20)}`;
   const extendedPackage = usesExtendedPackage ? buildExtendedPackage({
     mapping,
     metadata,
     component,
     document,
-    buffers: convertedBuffers,
-    corner: definition.corner,
-    sourceLabel: options.sourceLabel || definition.source.file || definition.source.url || "(inline IBIS)"
+    sourceLabel: sourceLabel || definition.source.file || definition.source.url || "(inline IBIS)"
   }) : void 0;
-  const refNode = (port) => extendedPackage?.dieNodes.get(port) || `REF${rails.indexOf(port)}`;
+  const aliases = extendedPackage?.packageData.boardPortAliases;
+  const spicePinMapping = Object.fromEntries(
+    Object.entries(mapping).filter(
+      ([, port]) => !aliases || !Object.hasOwn(aliases, port)
+    )
+  );
+  const boardNodes = new Map(
+    Object.entries(mapping).map(([node, port]) => [port, node])
+  );
   const tails = [];
   const lines = [
     `* General table-based IBIS ${definition.component}; SHA-256 ${hash}; converter ${CONVERTER_VERSION}`,
-    `.subckt ${name} ${Object.keys(mapping).join(" ")}`
+    `.subckt ${name} ${Object.keys(spicePinMapping).join(" ")}`
   ];
   const buffers = [];
   for (const [i, pin] of pins.entries()) {
-    const converted = convertedBuffers[i], bufferName = `${name}_BUF${i}`;
+    const { converted, schedule } = signalsInRun[i];
+    const bufferName = `${name}_BUF${i}`;
     buffers.push(converted.source.replaceAll(converted.name, bufferName));
-    const ground = refNode(pin.references.pulldown);
+    const { pullup, pulldown, powerClamp, groundClamp, external } = pin.references;
+    const referencePorts = [pullup, pulldown, powerClamp, groundClamp];
+    if (external) referencePorts.push(external);
+    const referenceNodes = referencePorts.map(
+      (port) => extendedPackage?.dieNodes.get(port) || boardNodes.get(port)
+    );
+    const ground = referenceNodes[1];
     let die = extendedPackage?.dieNodes.get(pin.port) || `PAD${i}`;
     if (definition.packagePolicy === "vendor" && !usesExtendedPackage) {
       const terms = packageData.mappedPins.find(
         ({ physicalPin }) => physicalPin === pin.physicalPin
       );
-      const r = terms?.resistanceOhms || 0;
-      const l = terms?.inductanceHenries || 0;
-      if (r > 0) {
-        lines.push(`RPKG${i} ${die} PKGR${i} ${spiceNumber(r)}`);
-        die = `PKGR${i}`;
-      }
-      if (l > 0) {
-        lines.push(`LPKG${i} ${die} PKGL${i} ${spiceNumber(l)}`);
-        die = `PKGL${i}`;
-      }
+      if (!terms)
+        throw new IbisError(
+          "invalid_package",
+          `${pin.physicalPin}: missing package data`
+        );
+      const scalar = requireScalarPackageTerms(terms);
+      const branch = buildScalarPackageBranch({
+        boardSpiceNode: die,
+        index: i,
+        terms: scalar
+      });
+      die = branch.dieSpiceNode;
+      lines.push(...branch.elements);
+      if (scalar.capacitanceFarads > 0)
+        lines.push(
+          `CPKG${i} PAD${i} ${ground} ${spiceNumber(scalar.capacitanceFarads)}`
+        );
     }
-    const schedule = schedules[i];
     if (schedule) {
       const { samples: weights, tails: pinTails } = scheduleSwitchingCoefficients({
         converted,
@@ -1313,16 +1441,17 @@ function convertIbisModelToSpice(input, definition, run, options = {}) {
         deriveCoefficients: true
       });
       tails.push(...pinTails);
+      const times = formatSwitchingTimes(weights);
       for (const [label, column] of [
         ["KU", 1],
         ["KD", 2]
       ])
         lines.push(
-          `V${label}${i} ${label}${i} ${ground} PWL(${weights.map((sample) => `${spiceNumber(sample[0])} ${spiceNumber(sample[column])}`).join(" ")})`
+          `V${label}${i} ${label}${i} ${ground} PWL(${weights.map((sample, index) => `${times[index]} ${spiceNumber(sample[column])}`).join(" ")})`
         );
     }
     lines.push(
-      `XBUF${i} ${die} ${[pin.references.pullup, pin.references.pulldown, pin.references.powerClamp, pin.references.groundClamp, ...pin.references.external ? [pin.references.external] : []].map(refNode).join(" ")}${schedule ? ` KU${i} KD${i}` : ""} ${bufferName}`
+      `XBUF${i} ${die} ${referenceNodes.join(" ")}${schedule ? ` KU${i} KD${i}` : ""} ${bufferName}`
     );
   }
   if (extendedPackage) lines.push(...extendedPackage.elements);
@@ -1330,15 +1459,14 @@ function convertIbisModelToSpice(input, definition, run, options = {}) {
   const warnings = [...omissions];
   if (tails.length) warnings.push(SETTLED_TAIL_WARNING);
   if (extendedPackage) warnings.push(...extendedPackage.warnings);
-  else if (definition.packagePolicy === "vendor") warnings.push(PACKAGE_WARNING);
   return {
     source: [...lines, ...buffers].join("\n") + "\n",
-    spicePinMapping: mapping,
+    spicePinMapping,
     sourceSha256: hash,
     warnings,
     metadata: {
       ...metadata,
-      packageData: extendedPackage?.data || metadata.packageData,
+      packageData: extendedPackage?.packageData || metadata.packageData,
       ...tails.length ? { switchingTails: tails } : {}
     }
   };

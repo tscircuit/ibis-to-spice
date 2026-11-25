@@ -1,5 +1,5 @@
 // lib/ibis-sections.ts
-function sections(text) {
+function parseIbisSections(text) {
   const headers = [
     ...text.matchAll(/^[ \t]*\[([^\]\r\n]+)\][ \t]*([^\r\n]*)/gm)
   ];
@@ -12,13 +12,13 @@ function sections(text) {
     )
   }));
 }
-function lines(body) {
+function stripIbisCommentLines(body) {
   return body.split(/\r?\n/).map((line) => line.split("|")[0].trim()).filter(Boolean);
 }
 
 // lib/package-matrix-syntax.ts
 var SPARSE_ENTRY_FIELDS = 2;
-function matrixNumber({
+function parseMatrixNumber({
   token,
   label
 }) {
@@ -39,35 +39,35 @@ function matrixNumber({
   }
 }
 function parseMatrix({
-  sections: sections2,
+  sections,
   packagePinNames,
   label
 }) {
-  const format = sections2[0].argument.toLowerCase();
+  const format = sections[0].argument.toLowerCase();
   const isSupportedFormat = [
     "full_matrix",
     "banded_matrix",
     "sparse_matrix"
   ].includes(format);
-  if (!isSupportedFormat || sections2[0].lines.length)
+  if (!isSupportedFormat || sections[0].lines.length)
     throw new IbisError("invalid_package", `${label}: invalid matrix format`);
   const isBanded = format === "banded_matrix";
-  const hasBand = sections2[1]?.key === "bandwidth";
+  const hasBand = sections[1]?.key === "bandwidth";
   let bandwidth = packagePinNames.length - 1;
-  const hasInvalidBandwidth = hasBand && (!/^\d+$/.test(sections2[1].argument) || sections2[1].lines.length);
+  const hasInvalidBandwidth = hasBand && (!/^\d+$/.test(sections[1].argument) || sections[1].lines.length);
   if (isBanded !== hasBand || hasInvalidBandwidth) {
     throw new IbisError(
       "invalid_package",
       `${label}: [Bandwidth] required only for Banded_matrix before rows`
     );
   }
-  if (hasBand) bandwidth = Number(sections2[1].argument);
+  if (hasBand) bandwidth = Number(sections[1].argument);
   if (!Number.isSafeInteger(bandwidth) || bandwidth >= packagePinNames.length)
     throw new IbisError(
       "invalid_package",
       `${label}: invalid bandwidth ${bandwidth}`
     );
-  const rows = sections2.slice(1 + Number(hasBand));
+  const rows = sections.slice(1 + Number(hasBand));
   const isRowOutOfOrder = rows.some(
     (row, rowIndex) => row.key !== "row" || row.argument !== packagePinNames[rowIndex]
   );
@@ -95,33 +95,14 @@ function parseMatrix({
   );
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
     if (format === "sparse_matrix") {
-      const seen = /* @__PURE__ */ new Set();
-      for (const line of rows[rowIndex].lines) {
-        const tokens = line.split(/\s+/);
-        if (tokens.length !== SPARSE_ENTRY_FIELDS) {
-          throw new IbisError(
-            "invalid_package",
-            `${label} ${packagePinNames[rowIndex]}: each sparse (index, value) pair needs its own line`
-          );
-        }
-        const columnIndex = indices.get(tokens[0]);
-        if (columnIndex === void 0)
-          throw new IbisError(
-            "invalid_package",
-            `${label}: unknown sparse column pin ${tokens[0]}`
-          );
-        if (columnIndex < rowIndex)
-          throw new IbisError(
-            "invalid_package",
-            `${label}: sparse entries must use the upper triangle in [Pin Numbers] order`
-          );
-        if (seen.has(columnIndex))
-          throw new IbisError(
-            "invalid_package",
-            `${label}: duplicate sparse column ${tokens[0]}`
-          );
-        seen.add(columnIndex);
-        const matrixEntry = matrixNumber({ token: tokens[1], label });
+      const entries = parseSparseRow({
+        rowLines: rows[rowIndex].lines,
+        rowIndex,
+        pinName: packagePinNames[rowIndex],
+        indices,
+        label
+      });
+      for (const [columnIndex, matrixEntry] of entries) {
         matrix[columnIndex][rowIndex] = matrixEntry;
         matrix[rowIndex][columnIndex] = matrixEntry;
       }
@@ -140,7 +121,7 @@ function parseMatrix({
     }
     for (let diagonalOffset = 0; diagonalOffset < count; diagonalOffset++) {
       const columnIndex = (rowIndex + diagonalOffset) % packagePinNames.length;
-      const matrixEntry = matrixNumber({
+      const matrixEntry = parseMatrixNumber({
         token: matrixRowTokens[rowIndex][diagonalOffset],
         label
       });
@@ -150,24 +131,176 @@ function parseMatrix({
   }
   return matrix;
 }
+function parseSparseRow({
+  rowLines,
+  rowIndex,
+  pinName,
+  indices,
+  label
+}) {
+  const entries = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const line of rowLines) {
+    const tokens = line.split(/\s+/);
+    if (tokens.length !== SPARSE_ENTRY_FIELDS) {
+      throw new IbisError(
+        "invalid_package",
+        `${label} ${pinName}: each sparse (index, value) pair needs its own line`
+      );
+    }
+    const columnIndex = indices.get(tokens[0]);
+    if (columnIndex === void 0)
+      throw new IbisError(
+        "invalid_package",
+        `${label}: unknown sparse column pin ${tokens[0]}`
+      );
+    if (columnIndex < rowIndex)
+      throw new IbisError(
+        "invalid_package",
+        `${label}: sparse entries must use the upper triangle in [Pin Numbers] order`
+      );
+    if (seen.has(columnIndex))
+      throw new IbisError(
+        "invalid_package",
+        `${label}: duplicate sparse column ${tokens[0]}`
+      );
+    seen.add(columnIndex);
+    const matrixEntry = parseMatrixNumber({ token: tokens[1], label });
+    entries.push([columnIndex, matrixEntry]);
+  }
+  return entries;
+}
+
+// lib/validate-package-matrices.ts
+var PIVOT_TOLERANCE = 1e-12;
+function checkSymmetricMatrix({
+  matrix,
+  size,
+  label
+}) {
+  if (!Array.isArray(matrix) || matrix.length !== size || Array.from(matrix).some(
+    (row) => !Array.isArray(row) || row.length !== size || Array.from(row).some((entry) => !Number.isFinite(entry))
+  )) {
+    throw new IbisError(
+      "invalid_package",
+      `${label}: finite square matrix of order ${size} required`
+    );
+  }
+  if (matrix.some((row, i) => row.some((entry, j) => entry !== matrix[j][i]))) {
+    throw new IbisError(
+      "invalid_package",
+      `${label}: symmetric matrix required`
+    );
+  }
+}
+function checkPositive({
+  matrix,
+  label,
+  requireIndependentLeads = false
+}) {
+  const requirement = requireIndependentLeads ? "definite on nonzero leads" : "semidefinite";
+  const error = `${label}: matrix is not positive ${requirement}; passive, nonsingular coupled leads required`;
+  const scales = matrix.map((row, i) => Math.sqrt(row[i]));
+  const active = scales.flatMap((scale, i) => scale > 0 ? [i] : []);
+  for (const [i, scale] of scales.entries()) {
+    if (Number.isNaN(scale) || scale === 0 && matrix[i].some((entry) => entry !== 0))
+      throw new IbisError("invalid_package", error);
+  }
+  const residual = active.map(
+    (i) => active.map((j) => {
+      if (i === j) return 1;
+      return matrix[i][j] / Math.max(scales[i], scales[j]) / Math.min(scales[i], scales[j]);
+    })
+  );
+  const order = active.map((_, i) => i);
+  for (let column = 0; column < order.length; column++) {
+    let pivotPosition = column;
+    for (let j = column + 1; j < order.length; j++) {
+      if (residual[order[j]][order[j]] > residual[order[pivotPosition]][order[pivotPosition]])
+        pivotPosition = j;
+    }
+    const pivot = order[pivotPosition];
+    order[pivotPosition] = order[column];
+    order[column] = pivot;
+    const diagonal = residual[pivot][pivot];
+    const remaining = order.slice(column);
+    if (diagonal <= PIVOT_TOLERANCE) {
+      if (requireIndependentLeads || remaining.some(
+        (i) => remaining.some((j) => Math.abs(residual[i][j]) > PIVOT_TOLERANCE)
+      ))
+        throw new IbisError("invalid_package", error);
+      return;
+    }
+    const trailing = remaining.slice(1);
+    for (const i of trailing) {
+      for (const j of trailing) {
+        const update = residual[i][j] - residual[i][pivot] * residual[j][pivot] / diagonal;
+        if (!Number.isFinite(update))
+          throw new IbisError("invalid_package", error);
+        residual[i][j] = update;
+      }
+    }
+  }
+}
+function checkIbisMutualTerms({
+  matrix,
+  label
+}) {
+  for (const [i, row] of matrix.entries()) {
+    if (row.some(
+      (entry, j) => j !== i && entry !== 0 && Math.abs(entry) >= row[i]
+    ))
+      throw new IbisError(
+        "invalid_package",
+        `${label}: self term must exceed each absolute mutual term (IBIS section 7)`
+      );
+  }
+}
+function getCapacitanceRowTolerance(row) {
+  return row.reduce((sum, entry) => sum + Math.abs(entry) * PIVOT_TOLERANCE, 0);
+}
+function sumReferenceCapacitance(row) {
+  const capacitanceFarads = row.reduce((sum, entry) => sum + entry, 0);
+  if (Math.abs(capacitanceFarads) <= getCapacitanceRowTolerance(row)) return 0;
+  return capacitanceFarads;
+}
+function checkCapacitance({
+  matrix,
+  label
+}) {
+  for (const [i, row] of matrix.entries()) {
+    if (row.some((capacitance, j) => j !== i && capacitance > 0)) {
+      throw new IbisError(
+        "invalid_package",
+        `${label}: Maxwell capacitance has positive off-diagonal entries; correction requires uniformly positive couplings and diagonally dominant rows`
+      );
+    }
+    const reference = sumReferenceCapacitance(row);
+    if (reference < 0 || !Number.isFinite(reference))
+      throw new IbisError(
+        "invalid_package",
+        `${label}: invalid reference capacitance (negative reference capacitance or non-finite Maxwell row sum)`
+      );
+  }
+}
 
 // lib/package-model.ts
 var PACKAGE_NAME_LIMIT = 40;
 var DESCRIPTION_LIMIT = 59;
 var PACKAGE_PIN_LIMIT = 5;
-var MATRIX_FIELDS = /* @__PURE__ */ new Map([
-  ["resistance matrix", "R"],
-  ["inductance matrix", "L"],
-  ["capacitance matrix", "C"]
-]);
+var MATRIX_FIELDS = {
+  "resistance matrix": "R",
+  "inductance matrix": "L",
+  "capacitance matrix": "C"
+};
 function parsePackageModel({
   block,
   name
 }) {
   if (!name || name.length > PACKAGE_NAME_LIMIT)
     throw new IbisError("invalid_package", `${name}: invalid package name`);
-  const [header, ...body] = sections(block);
-  if (lines(header.body).length) {
+  const [header, ...body] = parseIbisSections(block);
+  if (stripIbisCommentLines(header.body).length) {
     throw new IbisError(
       "invalid_package",
       `${name}: data before package metadata`
@@ -179,28 +312,33 @@ function parsePackageModel({
       "invalid_package",
       `${name}: missing [End Package Model]`
     );
-  if (body[end].argument)
+  const followingSection = body[end + 1];
+  if (body[end].argument || stripIbisCommentLines(body[end].body).length || followingSection && followingSection.key !== "external circuit")
     throw new IbisError(
       "invalid_package",
       `${name}: unexpected data after [End Package Model]`
     );
-  const dataSections = body.slice(0, end).filter(({ key }) => key !== "comment char").map(({ key, argument, body: body2 }) => ({ key, argument, lines: lines(body2) }));
+  const dataSections = body.slice(0, end).filter(({ key }) => key !== "comment char").map(({ key, argument, body: body2 }) => ({
+    key,
+    argument,
+    lines: stripIbisCommentLines(body2)
+  }));
   const metadata = {};
   const pins = [];
-  const mergedPins = {};
+  const mergedPins = /* @__PURE__ */ Object.create(null);
   const matrices = {};
   let declaredPinCount = 0;
   let phase = "metadata";
   for (let i = 0; i < dataSections.length; i++) {
     const section = dataSections[i];
-    const { key, argument, lines: lines2 } = section;
+    const { key, argument, lines } = section;
     if (key === "number of sections")
       throw new IbisError(
         "invalid_package",
         `${name}: package sections are unsupported ([Number Of Sections]); scalar fallback is forbidden`
       );
     if (["manufacturer", "oem", "description", "number of pins"].includes(key)) {
-      if (phase !== "metadata" || key in metadata || lines2.length) {
+      if (phase !== "metadata" || key in metadata || lines.length) {
         throw new IbisError(
           "invalid_package",
           `${name}: invalid or duplicate [${key}]`
@@ -231,39 +369,17 @@ function parsePackageModel({
           `${name}: [Number Of Pins] must precede [Pin Numbers]`
         );
       }
-      for (const line of lines2) {
-        const pinKey = line.toLowerCase();
-        const hasSectionSyntax = /\s/.test(line) || line.includes("=") || line.includes("/");
-        if (hasSectionSyntax || pinKey === "fork" || pinKey === "endfork") {
-          throw new IbisError(
-            "invalid_package",
-            `${name}: package section syntax is unsupported in [Pin Numbers]`
-          );
-        }
-        if (line.length > PACKAGE_PIN_LIMIT || pins.includes(line)) {
-          throw new IbisError(
-            "invalid_package",
-            `${name}: invalid or duplicate package pin ${line}`
-          );
-        }
-        pins.push(line);
-      }
-      if (pins.length !== declaredPinCount) {
-        throw new IbisError(
-          "invalid_package",
-          `${name}: package pin count ${pins.length} differs from [Number Of Pins] ${declaredPinCount}`
-        );
-      }
+      pins.push(...parsePackagePinNumbers({ lines, declaredPinCount, name }));
       phase = "pins";
       continue;
     }
     if (key === "merged pins") {
-      if (phase !== "pins" || !pins.includes(argument) || !lines2.length)
+      if (phase !== "pins" || !pins.includes(argument) || !lines.length)
         throw new IbisError(
           "invalid_package",
           `${name}: invalid [Merged Pins] representative ${argument}`
         );
-      for (const mergedPin of lines2.flatMap((line) => line.split(/\s+/))) {
+      for (const mergedPin of lines.flatMap((line) => line.split(/\s+/))) {
         if (pins.includes(mergedPin) || Object.hasOwn(mergedPins, mergedPin))
           throw new IbisError(
             "invalid_package",
@@ -274,13 +390,13 @@ function parsePackageModel({
       continue;
     }
     if (key === "model data") {
-      if (phase !== "pins" || argument || lines2.length)
+      if (phase !== "pins" || argument || lines.length)
         throw new IbisError("invalid_package", `${name}: invalid [Model Data]`);
       phase = "data";
       continue;
     }
     if (key === "end model data") {
-      if (phase !== "data" || argument || lines2.length)
+      if (phase !== "data" || argument || lines.length)
         throw new IbisError(
           "invalid_package",
           `${name}: invalid [End Model Data]`
@@ -288,7 +404,7 @@ function parsePackageModel({
       phase = "end";
       continue;
     }
-    const field = MATRIX_FIELDS.get(key);
+    const field = Object.hasOwn(MATRIX_FIELDS, key) ? MATRIX_FIELDS[key] : void 0;
     if (!field || phase !== "data" || matrices[field])
       throw new IbisError(
         "invalid_package",
@@ -318,17 +434,51 @@ function parsePackageModel({
       "invalid_package",
       `${name}: required inductance/capacitance matrix missing`
     );
+  const resistance = matrices.R || pins.map(() => pins.map(() => 0));
+  checkIbisMutualTerms({ matrix: resistance, label: `${name} resistance` });
+  checkIbisMutualTerms({ matrix: matrices.L, label: `${name} inductance` });
   return {
     name,
     manufacturer: metadata.manufacturer,
     oem: metadata.oem,
     description: metadata.description,
     pins,
-    R: matrices.R || pins.map(() => pins.map(() => 0)),
+    R: resistance,
     L: matrices.L,
     C: matrices.C,
-    mergedPins
+    mergedPins: { ...mergedPins }
   };
+}
+function parsePackagePinNumbers({
+  lines,
+  declaredPinCount,
+  name
+}) {
+  const pins = [];
+  for (const line of lines) {
+    const pinKey = line.toLowerCase();
+    const hasSectionSyntax = /\s/.test(line) || line.includes("=") || line.includes("/");
+    if (hasSectionSyntax || pinKey === "fork" || pinKey === "endfork") {
+      throw new IbisError(
+        "invalid_package",
+        `${name}: package section syntax is unsupported in [Pin Numbers]`
+      );
+    }
+    if (line.length > PACKAGE_PIN_LIMIT || pins.includes(line)) {
+      throw new IbisError(
+        "invalid_package",
+        `${name}: invalid or duplicate package pin ${line}`
+      );
+    }
+    pins.push(line);
+  }
+  if (pins.length !== declaredPinCount) {
+    throw new IbisError(
+      "invalid_package",
+      `${name}: package pin count ${pins.length} differs from [Number Of Pins] ${declaredPinCount}`
+    );
+  }
+  return pins;
 }
 
 // lib/parse-ibis.ts
@@ -360,12 +510,13 @@ function ibisNumber(token) {
     f: 1e-15
   };
   const suffix = match[2];
-  if (!/^[TGMkmunpf]?(?:V|A|[Oo]hms?|F|H|s)?$/.test(suffix))
+  const factor = scales[suffix[0]] || 1;
+  const unit = Object.hasOwn(scales, suffix[0]) ? suffix.slice(1) : suffix;
+  if (!/^(?:v|a|ohms?|f|h|s)?$/i.test(unit))
     throw new IbisError(
       "invalid_number",
       `Unsupported IBIS numeric suffix: ${token}`
     );
-  const factor = scales[suffix[0]] ?? 1;
   const value = Number(match[1]) * factor;
   if (!Number.isFinite(value))
     throw new IbisError("invalid_number", `Non-finite IBIS value: ${token}`);
@@ -395,7 +546,7 @@ function rampRange(tokens = []) {
   return [rampRatio(typical), rampRatio(minimum), rampRatio(maximum)];
 }
 function table(section) {
-  const rows = lines(section.body).filter((line) => /^[+\-.\d]/.test(line)).map((line) => {
+  const rows = stripIbisCommentLines(section.body).filter((line) => /^[+\-.\d]/.test(line)).map((line) => {
     const tokens = line.split(/\s+/);
     if (tokens.length < 4)
       throw new IbisError("invalid_table", `Incomplete ${section.key} row`);
@@ -423,14 +574,14 @@ function table(section) {
 }
 function parameters(section) {
   return Object.fromEntries(
-    lines(section.body).filter((line) => !/^[+\-.\d]/.test(line)).map((line) => {
+    stripIbisCommentLines(section.body).filter((line) => !/^[+\-.\d]/.test(line)).map((line) => {
       const [key, ...tokens] = line.replace(/=/g, " ").split(/\s+/);
       return [key.toLowerCase(), tokens];
     })
   );
 }
 function parseBuffer(name, text) {
-  const parsed = sections(text);
+  const parsed = parseIbisSections(text);
   const first = parameters(parsed[0]);
   if (Object.keys(first).some((key) => key.startsWith("c_comp_")))
     throw new IbisError(
@@ -545,21 +696,26 @@ function parseBuffer(name, text) {
   }
   return buffer;
 }
+function validateCommentDeclarations(text) {
+  for (const declaration of text.matchAll(
+    /^[ \t]*\[comment[ \t_]+char\][ \t]*([^\r\n]*)([\s\S]*?)(?=^[ \t]*\[|(?![\s\S]))/gim
+  )) {
+    const match = declaration[1].match(/^(.)_char(?:[ \t]*(?:\|.*)?)?$/i);
+    if (!match || stripIbisCommentLines(declaration[2]).length)
+      throw new IbisError("invalid_ibis", "Invalid [Comment Char] declaration");
+    if (match[1] !== "|")
+      throw new IbisError("unsupported_feature", "Non-pipe IBIS comment characters are not supported");
+  }
+}
 function parseIbis(text) {
   text = text.replace(/^\uFEFF/, "");
-  for (const declaration of text.matchAll(
-    /^[ \t]*\[comment[ _]char\]\s*(.)_char/gim
-  ))
-    if (declaration[1] !== "|")
-      throw new IbisError(
-        "unsupported_feature",
-        "Non-pipe IBIS comment characters are not supported"
-      );
-  if (!/^[ \t]*\[ibis[ _]ver\]/im.test(text) || /<html|<!doctype/i.test(text.slice(0, 512)))
+  validateCommentDeclarations(text);
+  const version = text.match(/^[ \t]*\[ibis[ \t_]+ver\][ \t]*(\S+)/im)?.[1];
+  if (!version || /<html|<!doctype/i.test(text.slice(0, 512)))
     throw new IbisError("invalid_ibis", "Expected an IBIS text file");
   const headers = [
     ...text.matchAll(
-      /^[ \t]*\[(component|model|model[ _]selector|define[ _]package[ _]model|end)\][ \t]*([^\r\n]*)/gim
+      /^[ \t]*\[(component|model|submodel|model[ \t_]+selector|define[ \t_]+package[ \t_]+model|test[ \t_]+data|test[ \t_]+load|interconnect[ \t_]+model[ \t_]+set|end)\][ \t]*([^\r\n]*)/gim
     )
   ];
   const components = /* @__PURE__ */ Object.create(null);
@@ -568,11 +724,8 @@ function parseIbis(text) {
   const packageDefinitions = /* @__PURE__ */ new Map();
   for (let i = 0; i < headers.length; i++) {
     const header = headers[i];
-    const key = header[1].toLowerCase().replace(/_/g, " "), name = header[2].split("|")[0].trim();
-    const block = text.slice(
-      header.index,
-      headers[i + 1]?.index ?? text.length
-    );
+    const key = header[1].toLowerCase().replace(/[ \t_]+/g, " "), name = header[2].split("|")[0].trim();
+    const block = text.slice(header.index, headers[i + 1]?.index || text.length);
     if (key === "define package model") {
       const definitions = packageDefinitions.get(name) || [];
       packageDefinitions.set(name, [...definitions, block]);
@@ -583,7 +736,7 @@ function parseIbis(text) {
       modelText[name] = block;
     }
     if (key === "model selector")
-      selectors[name] = lines(block.slice(header[0].length)).map(
+      selectors[name] = stripIbisCommentLines(block.slice(header[0].length)).map(
         (line) => line.split(/\s+/)[0]
       );
     if (key === "component") {
@@ -595,11 +748,11 @@ function parseIbis(text) {
         pinMapping: /* @__PURE__ */ Object.create(null),
         unsupportedFeatures: []
       };
-      for (const section of sections(block)) {
+      for (const section of parseIbisSections(block)) {
         if (["series pin mapping", "series switch groups", "external circuit", "circuit call", "driver schedule", "node declarations"].includes(section.key))
           component.unsupportedFeatures.push(section.key);
         if (section.key === "diff pin")
-          for (const line of lines(section.body)) {
+          for (const line of stripIbisCommentLines(section.body)) {
             const [pin, invertedPin, voltage, ...delay] = line.split(/\s+/);
             if (!invertedPin || voltage === void 0)
               throw new IbisError("invalid_diff_pin", `${name}: incomplete [Diff Pin] row`);
@@ -607,7 +760,7 @@ function parseIbis(text) {
           }
         if (section.key === "pin mapping") {
           const columns = section.argument.toLowerCase().split(/\s+/);
-          for (const line of lines(section.body)) {
+          for (const line of stripIbisCommentLines(section.body)) {
             const tokens = line.split(/\s+/), pin = tokens[0];
             const value = (field) => {
               const index = columns.indexOf(field), token = index < 0 ? void 0 : tokens[index + 1];
@@ -629,7 +782,7 @@ function parseIbis(text) {
               component.package[property] = range(fields[field]);
         }
         if (section.key === "pin")
-          for (const line of lines(section.body)) {
+          for (const line of stripIbisCommentLines(section.body)) {
             const tokens = line.split(/\s+/);
             const [pin, signal, model] = tokens;
             const columns = section.argument.toLowerCase().split(/\s+/);
@@ -655,7 +808,7 @@ function parseIbis(text) {
     }
   }
   return {
-    version: text.match(/\[ibis[ _]ver\]\s*(\S+)/i)[1],
+    version,
     components,
     selectors,
     modelNames: Object.keys(modelText),
@@ -952,7 +1105,7 @@ function convertIbisBuffer(document, model, options) {
     );
   const referenceNode = (key) => options.separateReferences ? { pu: "PU_REF", pd: "PD_REF", pc: "PC_REF", gc: "GC_REF" }[key] : key === "pu" || key === "pc" ? "VDD" : "VSS";
   const groundNode = options.separateReferences ? "PD_REF" : "VSS";
-  const lines2 = [
+  const lines = [
     `* IBIS ${model}; ${corner}; converter ${CONVERTER_VERSION}; package excluded`,
     `.subckt ${name} PAD ${options.separateReferences ? "PU_REF PD_REF PC_REF GC_REF" : "VDD VSS"}${options.externalReference ? " EXT_REF" : ""}${options.mode === "output" ? " KU KD" : ""}`,
     `Ccomp PAD ${groundNode} ${spiceNumber(capacitance)}`
@@ -964,13 +1117,13 @@ function convertIbisBuffer(document, model, options) {
     const pairs = tables.raw[key].map(([x, y]) => `${spiceNumber(x)},${spiceNumber(y)}`).join(",");
     const boundedExpression = `min(max(${expression},${spiceNumber(tables.raw[key][0][0])}),${spiceNumber(tables.raw[key].at(-1)[0])})`;
     const factor = key === "pu" || key === "pd" ? `V(K${key === "pu" ? "U" : "D"},${groundNode})*` : "";
-    lines2.push(
+    lines.push(
       `B${key} PAD ${referenceNode(key)} I={${factor}pwl(${boundedExpression},${pairs})}`
     );
   }
-  lines2.push(`.ends ${name}`);
+  lines.push(`.ends ${name}`);
   return {
-    source: lines2.join("\n") + "\n",
+    source: lines.join("\n") + "\n",
     name,
     buffer,
     corner,
@@ -1014,7 +1167,7 @@ function clockWeights(converted, stimulus) {
   ) >= half)
     throw new IbisError(
       "overlapping_edges",
-      "Clock edge interval is shorter than the IBIS switching waveform"
+      "Clock edge interval cannot contain the full IBIS switching waveform; use convertIbisModelToSpice for settled-tail or abutting edges"
     );
   const samples = [];
   for (let i = 0; i < intervals; i++) {
@@ -1082,7 +1235,7 @@ function convertIbisComponentToSpice(text, config) {
     VSS: config.power.vss
   };
   const subcircuits = [];
-  const lines2 = [
+  const lines = [
     `* Table-based IBIS component ${config.component}; package policy ${config.packageModel}`,
     `* Source SHA-256 ${sourceHash(text)}; converter ${CONVERTER_VERSION}`,
     `.subckt ${name} ${entries.map((_, i) => `PAD${i}`).join(" ")} VDD VSS`
@@ -1135,7 +1288,7 @@ function convertIbisComponentToSpice(text, config) {
       if (component.coupledPackage)
         throw new IbisError(
           "unsupported_package",
-          `${component.name}: coupled package model requires explicit packageModel="none" in this release`
+          `${component.name}: use convertIbisModelToSpice with packagePolicy="vendor" for coupled packages, or explicitly select packageModel="none" here`
         );
       const corner = config.corner ?? "typical";
       const resistance = pin.resistance ?? (component.package.resistance && cornerValue(component.package.resistance, corner, "R_pkg"));
@@ -1150,16 +1303,16 @@ function convertIbisComponentToSpice(text, config) {
         );
       let previous = die;
       if (resistance > 0) {
-        lines2.push(`RPKG${i} ${previous} PKGR${i} ${spiceNumber(resistance)}`);
+        lines.push(`RPKG${i} ${previous} PKGR${i} ${spiceNumber(resistance)}`);
         previous = `PKGR${i}`;
       }
       if (inductance > 0) {
-        lines2.push(`LPKG${i} ${previous} PKGL${i} ${spiceNumber(inductance)}`);
+        lines.push(`LPKG${i} ${previous} PKGL${i} ${spiceNumber(inductance)}`);
         previous = `PKGL${i}`;
       }
       die = previous;
       if (capacitance > 0)
-        lines2.push(`CPKG${i} PAD${i} VSS ${spiceNumber(capacitance)}`);
+        lines.push(`CPKG${i} PAD${i} VSS ${spiceNumber(capacitance)}`);
     }
     if (binding.mode === "output") {
       if (!binding.stimulus)
@@ -1172,7 +1325,7 @@ function convertIbisComponentToSpice(text, config) {
         ["KU", 1],
         ["KD", 2]
       ])
-        lines2.push(
+        lines.push(
           `V${label}${i} ${label}${i} VSS PWL(${wave.map((sample) => `${spiceNumber(sample[0])} ${spiceNumber(sample[column])}`).join(" ")})`
         );
     } else if (binding.stimulus)
@@ -1180,13 +1333,13 @@ function convertIbisComponentToSpice(text, config) {
         "invalid_stimulus",
         `${port}: input mode cannot have an output stimulus`
       );
-    lines2.push(
+    lines.push(
       `XBUF${i} ${die} VDD VSS${binding.mode === "output" ? ` KU${i} KD${i}` : ""} ${converted.name}`
     );
   }
-  lines2.push(`.ends ${name}`);
+  lines.push(`.ends ${name}`);
   return {
-    source: [...lines2, ...subcircuits].join("\n") + "\n",
+    source: [...lines, ...subcircuits].join("\n") + "\n",
     spicePinMapping: mapping,
     warnings: config.packageModel === "none" ? ["Package parasitics excluded by explicit packageModel=none"] : []
   };
@@ -1335,6 +1488,11 @@ async function loadIbisDefinitionSource(source, options = {}) {
 }
 
 export {
+  checkSymmetricMatrix,
+  checkPositive,
+  getCapacitanceRowTolerance,
+  sumReferenceCapacitance,
+  checkCapacitance,
   IbisError,
   ibisNumber,
   cornerValue,

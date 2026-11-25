@@ -1,5 +1,7 @@
 import { ibisNumber, IbisError } from "./parse-ibis"
 import type { Matrix, PackageModel } from "./package-model"
+type PackagePinName = PackageModel["pins"][number]
+
 interface PackageSection {
   key: string
   argument: string
@@ -10,7 +12,7 @@ interface PackageSection {
 const SPARSE_ENTRY_FIELDS = 2
 
 /** Read a finite, specified IBIS matrix entry. */
-function matrixNumber({
+function parseMatrixNumber({
   token,
   label,
 }: {
@@ -101,33 +103,14 @@ export function parseMatrix({
   )
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
     if (format === "sparse_matrix") {
-      const seen = new Set<number>()
-      for (const line of rows[rowIndex].lines) {
-        const tokens = line.split(/\s+/)
-        if (tokens.length !== SPARSE_ENTRY_FIELDS) {
-          throw new IbisError(
-            "invalid_package",
-            `${label} ${packagePinNames[rowIndex]}: each sparse (index, value) pair needs its own line`,
-          )
-        }
-        const columnIndex = indices.get(tokens[0])
-        if (columnIndex === undefined)
-          throw new IbisError(
-            "invalid_package",
-            `${label}: unknown sparse column pin ${tokens[0]}`,
-          )
-        if (columnIndex < rowIndex)
-          throw new IbisError(
-            "invalid_package",
-            `${label}: sparse entries must use the upper triangle in [Pin Numbers] order`,
-          )
-        if (seen.has(columnIndex))
-          throw new IbisError(
-            "invalid_package",
-            `${label}: duplicate sparse column ${tokens[0]}`,
-          )
-        seen.add(columnIndex)
-        const matrixEntry = matrixNumber({ token: tokens[1], label })
+      const entries = parseSparseRow({
+        rowLines: rows[rowIndex].lines,
+        rowIndex,
+        pinName: packagePinNames[rowIndex],
+        indices,
+        label,
+      })
+      for (const [columnIndex, matrixEntry] of entries) {
         matrix[columnIndex][rowIndex] = matrixEntry
         matrix[rowIndex][columnIndex] = matrixEntry
       }
@@ -146,7 +129,7 @@ export function parseMatrix({
     }
     for (let diagonalOffset = 0; diagonalOffset < count; diagonalOffset++) {
       const columnIndex = (rowIndex + diagonalOffset) % packagePinNames.length
-      const matrixEntry = matrixNumber({
+      const matrixEntry = parseMatrixNumber({
         token: matrixRowTokens[rowIndex][diagonalOffset],
         label,
       })
@@ -155,4 +138,50 @@ export function parseMatrix({
     }
   }
   return matrix
+}
+
+function parseSparseRow({
+  rowLines,
+  rowIndex,
+  pinName,
+  indices,
+  label,
+}: {
+  rowLines: string[]
+  rowIndex: number
+  pinName: PackagePinName
+  indices: ReadonlyMap<PackagePinName, number>
+  label: string
+}): Array<[columnIndex: number, coefficient: number]> {
+  const entries: Array<[number, number]> = []
+  const seen = new Set<number>()
+  for (const line of rowLines) {
+    const tokens = line.split(/\s+/)
+    if (tokens.length !== SPARSE_ENTRY_FIELDS) {
+      throw new IbisError(
+        "invalid_package",
+        `${label} ${pinName}: each sparse (index, value) pair needs its own line`,
+      )
+    }
+    const columnIndex = indices.get(tokens[0])
+    if (columnIndex === undefined)
+      throw new IbisError(
+        "invalid_package",
+        `${label}: unknown sparse column pin ${tokens[0]}`,
+      )
+    if (columnIndex < rowIndex)
+      throw new IbisError(
+        "invalid_package",
+        `${label}: sparse entries must use the upper triangle in [Pin Numbers] order`,
+      )
+    if (seen.has(columnIndex))
+      throw new IbisError(
+        "invalid_package",
+        `${label}: duplicate sparse column ${tokens[0]}`,
+      )
+    seen.add(columnIndex)
+    const matrixEntry = parseMatrixNumber({ token: tokens[1], label })
+    entries.push([columnIndex, matrixEntry])
+  }
+  return entries
 }

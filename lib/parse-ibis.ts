@@ -1,9 +1,9 @@
-import { lines, sections, type Section } from "./ibis-sections"
+import { stripIbisCommentLines, parseIbisSections, type Section } from "./ibis-sections"
 import { parsePackageModel } from "./package-model"
 import type {
   IbisBuffer,
   IbisComponent,
-  IbisDocument,
+  ParsedIbisDocument,
   IbisRampRatio,
   IbisRange,
   IbisTable,
@@ -40,13 +40,14 @@ export function ibisNumber(token: string): number | null {
     f: 1e-15,
   }
   const suffix = match[2]
-  if (!/^[TGMkmunpf]?(?:V|A|[Oo]hms?|F|H|s)?$/.test(suffix))
+  const factor = scales[suffix[0]] || 1
+  const unit = Object.hasOwn(scales, suffix[0]) ? suffix.slice(1) : suffix
+  if (!/^(?:v|a|ohms?|f|h|s)?$/i.test(unit))
     throw new IbisError(
       "invalid_number",
       `Unsupported IBIS numeric suffix: ${token}`,
     )
   // Units such as V, A, ohms, F, H and s may follow a scale prefix.
-  const factor = scales[suffix[0]] ?? 1
   const value = Number(match[1]) * factor
   if (!Number.isFinite(value))
     throw new IbisError("invalid_number", `Non-finite IBIS value: ${token}`)
@@ -85,7 +86,7 @@ function rampRange(tokens: string[] = []): IbisRange<IbisRampRatio> {
 }
 
 function table(section: Section): IbisTable {
-  const rows = lines(section.body)
+  const rows = stripIbisCommentLines(section.body)
     .filter((line) => /^[+\-.\d]/.test(line))
     .map((line) => {
       const tokens = line.split(/\s+/)
@@ -115,7 +116,7 @@ function table(section: Section): IbisTable {
 }
 function parameters(section: Section): Record<string, string[]> {
   return Object.fromEntries(
-    lines(section.body)
+    stripIbisCommentLines(section.body)
       .filter((line) => !/^[+\-.\d]/.test(line))
       .map((line) => {
         const [key, ...tokens] = line.replace(/=/g, " ").split(/\s+/)
@@ -125,7 +126,7 @@ function parameters(section: Section): Record<string, string[]> {
 }
 
 function parseBuffer(name: string, text: string): IbisBuffer {
-  const parsed = sections(text)
+  const parsed = parseIbisSections(text)
   const first = parameters(parsed[0])
   if (Object.keys(first).some((key) => key.startsWith("c_comp_")))
     throw new IbisError(
@@ -244,39 +245,44 @@ function parseBuffer(name: string, text: string): IbisBuffer {
   return buffer
 }
 
-/** Parse metadata once, then parse only selected buffers; large vendor files stay usable. */
-export function parseIbis(text: string): IbisDocument {
-  text = text.replace(/^\uFEFF/, "")
+function validateCommentDeclarations(text: string): void {
   for (const declaration of text.matchAll(
-    /^[ \t]*\[comment[ _]char\]\s*(.)_char/gim,
-  ))
-    if (declaration[1] !== "|")
-      throw new IbisError(
-        "unsupported_feature",
-        "Non-pipe IBIS comment characters are not supported",
-      )
+    /^[ \t]*\[comment[ \t_]+char\][ \t]*([^\r\n]*)([\s\S]*?)(?=^[ \t]*\[|(?![\s\S]))/gim,
+  )) {
+    const match = declaration[1].match(/^(.)_char(?:[ \t]*(?:\|.*)?)?$/i)
+    if (!match || stripIbisCommentLines(declaration[2]).length)
+      throw new IbisError("invalid_ibis", "Invalid [Comment Char] declaration")
+    if (match[1] !== "|")
+      throw new IbisError("unsupported_feature", "Non-pipe IBIS comment characters are not supported")
+  }
+}
+
+type PackageModelName = NonNullable<IbisComponent["coupledPackage"]>
+
+/** Parse metadata once, then parse only selected buffers; large vendor files stay usable. */
+export function parseIbis(text: string): ParsedIbisDocument {
+  text = text.replace(/^\uFEFF/, "")
+  validateCommentDeclarations(text)
+  const version = text.match(/^[ \t]*\[ibis[ \t_]+ver\][ \t]*(\S+)/im)?.[1]
   if (
-    !/^[ \t]*\[ibis[ _]ver\]/im.test(text) ||
+    !version ||
     /<html|<!doctype/i.test(text.slice(0, 512))
   )
     throw new IbisError("invalid_ibis", "Expected an IBIS text file")
   const headers = [
     ...text.matchAll(
-      /^[ \t]*\[(component|model|model[ _]selector|define[ _]package[ _]model|end)\][ \t]*([^\r\n]*)/gim,
+      /^[ \t]*\[(component|model|submodel|model[ \t_]+selector|define[ \t_]+package[ \t_]+model|test[ \t_]+data|test[ \t_]+load|interconnect[ \t_]+model[ \t_]+set|end)\][ \t]*([^\r\n]*)/gim,
     ),
   ]
   const components: Record<string, IbisComponent> = Object.create(null)
   const selectors: Record<string, string[]> = Object.create(null)
   const modelText: Record<string, string> = Object.create(null)
-  const packageDefinitions = new Map<string, string[]>()
+  const packageDefinitions = new Map<PackageModelName, string[]>()
   for (let i = 0; i < headers.length; i++) {
     const header = headers[i]
-    const key = header[1].toLowerCase().replace(/_/g, " "),
+    const key = header[1].toLowerCase().replace(/[ \t_]+/g, " "),
       name = header[2].split("|")[0].trim()
-    const block = text.slice(
-      header.index!,
-      headers[i + 1]?.index ?? text.length,
-    )
+    const block = text.slice(header.index, headers[i + 1]?.index || text.length)
     if (key === "define package model") {
       const definitions = packageDefinitions.get(name) || []
       packageDefinitions.set(name, [...definitions, block])
@@ -287,7 +293,7 @@ export function parseIbis(text: string): IbisDocument {
       modelText[name] = block
     }
     if (key === "model selector")
-      selectors[name] = lines(block.slice(header[0].length)).map(
+      selectors[name] = stripIbisCommentLines(block.slice(header[0].length)).map(
         (line) => line.split(/\s+/)[0],
       )
     if (key === "component") {
@@ -299,11 +305,11 @@ export function parseIbis(text: string): IbisDocument {
         pinMapping: Object.create(null),
         unsupportedFeatures: [],
       }
-      for (const section of sections(block)) {
+      for (const section of parseIbisSections(block)) {
         if (["series pin mapping", "series switch groups", "external circuit", "circuit call", "driver schedule", "node declarations"].includes(section.key))
           component.unsupportedFeatures!.push(section.key)
         if (section.key === "diff pin")
-          for (const line of lines(section.body)) {
+          for (const line of stripIbisCommentLines(section.body)) {
             const [pin, invertedPin, voltage, ...delay] = line.split(/\s+/)
             if (!invertedPin || voltage === undefined)
               throw new IbisError("invalid_diff_pin", `${name}: incomplete [Diff Pin] row`)
@@ -311,7 +317,7 @@ export function parseIbis(text: string): IbisDocument {
           }
         if (section.key === "pin mapping") {
           const columns = section.argument.toLowerCase().split(/\s+/)
-          for (const line of lines(section.body)) {
+          for (const line of stripIbisCommentLines(section.body)) {
             const tokens = line.split(/\s+/), pin = tokens[0]
             const value = (field: string) => {
               const index = columns.indexOf(field), token = index < 0 ? undefined : tokens[index + 1]
@@ -333,7 +339,7 @@ export function parseIbis(text: string): IbisDocument {
               component.package[property] = range(fields[field])
         }
         if (section.key === "pin")
-          for (const line of lines(section.body)) {
+          for (const line of stripIbisCommentLines(section.body)) {
             const tokens = line.split(/\s+/)
             const [pin, signal, model] = tokens
             const columns = section.argument.toLowerCase().split(/\s+/)
@@ -364,7 +370,7 @@ export function parseIbis(text: string): IbisDocument {
     }
   }
   return {
-    version: text.match(/\[ibis[ _]ver\]\s*(\S+)/i)![1],
+    version,
     components,
     selectors,
     modelNames: Object.keys(modelText),

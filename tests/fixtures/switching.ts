@@ -101,9 +101,9 @@ export function points({
   label: "KU" | "KD"
 }): SpiceSamples {
   const line = text.split("\n").find((entry) => entry.startsWith(`V${label}0 `))
-  const values = line?.match(/ PWL\(([^)]+)\)$/)?.[1]
-  if (!values) throw new Error(`Missing ${label} PWL points`)
-  const tokens = values.split(/\s+/).map(Number)
+  const pointText = line?.match(/ PWL\(([^)]+)\)$/)?.[1]
+  if (!pointText) throw new Error(`Missing ${label} PWL points`)
+  const tokens = pointText.split(/\s+/).map(Number)
   return tokens
     .filter((_, i) => i % 2 === 0)
     .map((seconds, i) => [seconds, tokens[i * 2 + 1]])

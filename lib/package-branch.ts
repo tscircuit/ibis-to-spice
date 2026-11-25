@@ -1,100 +1,74 @@
+import { spiceNumber } from "./convert"
 import { IbisError } from "./parse-ibis"
-import type { CoupledPackageModel } from "./coupled-package"
 import type { IbisConversionMetadata } from "./types"
 
-/** The selected corner and per-pin overrides are resolved before stamping. */
 export type PinPackageTerms =
   IbisConversionMetadata["packageData"]["mappedPins"][number]
 
-/** Board-to-die series branch endpoints and the die buffer's electrical node. */
-export interface PackageBranch {
-  boardSpiceNode: string
-  seriesEndSpiceNode: string
-  dieSpiceNode: string
-  elements: string[]
+interface ScalarPackageTerms {
+  resistanceOhms: number
+  inductanceHenries: number
   capacitanceFarads: number
 }
 
-/** Construct the unique series branch for one scalar or matrix pin. */
-export function buildPackageBranch({
-  terminal,
-  packagePinName,
-  matrixPinName,
+export interface PackageBranch {
+  boardSpiceNode: string
+  dieSpiceNode: string
+  elements: string[]
+}
+
+/** Validate the selected corner and per-pin overrides before emitting scalar RLC. */
+export function requireScalarPackageTerms({
+  physicalPin,
+  resistanceOhms,
+  inductanceHenries,
+  capacitanceFarads,
+}: PinPackageTerms): ScalarPackageTerms {
+  if (
+    resistanceOhms === null ||
+    inductanceHenries === null ||
+    capacitanceFarads === null ||
+    [resistanceOhms, inductanceHenries, capacitanceFarads].some(
+      (term) => term < 0 || !Number.isFinite(term),
+    )
+  ) {
+    throw new IbisError(
+      "invalid_package",
+      `${physicalPin}: complete nonnegative vendor package R/L/C required`,
+    )
+  }
+  return { resistanceOhms, inductanceHenries, capacitanceFarads }
+}
+
+/** Stamp one physical series branch with an optional shared die endpoint. */
+export function buildScalarPackageBranch({
+  boardSpiceNode,
+  dieSpiceNode,
   index,
+  prefix = "PKG",
   terms,
-  coupled,
-  railVoltageVolts,
 }: {
-  terminal: string
-  packagePinName: string
-  matrixPinName: string
+  boardSpiceNode: string
+  dieSpiceNode?: string
   index: number
-  terms: PinPackageTerms | undefined
-  coupled?: CoupledPackageModel
-  railVoltageVolts?: number
+  prefix?: string
+  terms: ScalarPackageTerms
 }): PackageBranch {
+  const { resistanceOhms, inductanceHenries } = terms
   const elements: string[] = []
-  const matrixIndex = coupled?.activePins.indexOf(matrixPinName)
-  let boardSpiceNode = terminal
-  let seriesEndSpiceNode = terminal
-  let resistanceOhms: number
-  let capacitanceFarads = 0
-  if (coupled && matrixIndex !== undefined && matrixIndex >= 0) {
-    if (matrixPinName !== packagePinName) {
-      boardSpiceNode = `PKGM${index}`
-      elements.push(`VPKGM${index} ${terminal} ${boardSpiceNode} 0`)
-    }
-    seriesEndSpiceNode = `PKGD${matrixIndex}`
-    resistanceOhms = coupled.R[matrixIndex][matrixIndex]
-  } else {
-    if (
-      !terms ||
-      terms.resistanceOhms === null ||
-      terms.inductanceHenries === null ||
-      terms.capacitanceFarads === null ||
-      ![
-        terms.resistanceOhms,
-        terms.inductanceHenries,
-        terms.capacitanceFarads,
-      ].every((value) => Number.isFinite(value) && value >= 0)
-    )
-      throw new IbisError(
-        "invalid_package",
-        `${packagePinName}: complete nonnegative vendor package R/L/C required`,
-      )
-    const { inductanceHenries } = terms
-    resistanceOhms = terms.resistanceOhms
-    capacitanceFarads = terms.capacitanceFarads
-    let prefix = `PKG`
-    if (coupled) prefix = `PKGU`
-    if (resistanceOhms > 0) {
-      seriesEndSpiceNode = `${prefix}R${index}`
-      elements.push(
-        `R${prefix}${index} ${terminal} ${seriesEndSpiceNode} ${resistanceOhms}`,
-      )
-    }
-    if (inductanceHenries > 0) {
-      const nextSpiceNode = `${prefix}L${index}`
-      elements.push(
-        `L${prefix}${index} ${seriesEndSpiceNode} ${nextSpiceNode} ${inductanceHenries}`,
-      )
-      seriesEndSpiceNode = nextSpiceNode
-    }
-  }
-  // An ideal board rail would short a second ideal source through a lossless branch.
-  let dieSpiceNode = seriesEndSpiceNode
-  if (railVoltageVolts !== undefined && resistanceOhms > 0) {
-    dieSpiceNode = `DIE${index}`
+  let node = boardSpiceNode
+  if (resistanceOhms > 0) {
+    node = (inductanceHenries === 0 && dieSpiceNode) || `${prefix}R${index}`
     elements.push(
-      `VDIE${index} ${dieSpiceNode} 0 ${railVoltageVolts}`,
-      `VPKG${index} ${seriesEndSpiceNode} ${dieSpiceNode} 0`,
+      `R${prefix}${index} ${boardSpiceNode} ${node} ${spiceNumber(resistanceOhms)}`,
     )
   }
-  return {
-    boardSpiceNode,
-    seriesEndSpiceNode,
-    dieSpiceNode,
-    capacitanceFarads,
-    elements,
+  if (inductanceHenries > 0) {
+    const end = dieSpiceNode || `${prefix}L${index}`
+    elements.push(
+      `L${prefix}${index} ${node} ${end} ${spiceNumber(inductanceHenries)}`,
+    )
+    node = end
   }
+  return { boardSpiceNode, dieSpiceNode: node, elements }
 }

@@ -21,7 +21,9 @@ test("converts a resistive vendor supply and a TI coupled package", () => {
     stimuli: {},
   }
   const bias = convertIbisModelToSpice(scalar, scalarDefinition, scalarRun)
-  expect(bias.source).toContain("VDIE3 DIE3 0 3.3")
+  expect(bias.source).toContain("RPKG3 REF1 PKGR3 0.0278")
+  expect(bias.source).toContain("LPKG3 PKGR3 PKGL3 2.39503e-9")
+  expect(bias.source).not.toMatch(/^VDIE/m)
   expect(
     bias.metadata.packageData.mappedPins.find((pin) => pin.physicalPin === "8"),
   ).toMatchObject({ role: "reference", resistanceOhms: 0.0278 })

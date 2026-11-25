@@ -49,13 +49,12 @@ A1
     "B1",
   ])
   assert.match(unlisted.source, /RPKGU2 REF0 \S+ 7\n/)
-  assert.match(unlisted.source, /LPKGU2 \S+ \S+ 7(?:\.0+1)?e-9\n/)
+  assert.match(unlisted.source, /LPKGU2 \S+ \S+ 7e-9\n/)
   assert.match(unlisted.source, /RPKGU3 REF1 \S+ 99\n/)
   assert.match(unlisted.source, /LPKGU3 \S+ \S+ 9\.9e-8\n/)
-  assert.match(unlisted.source, /CPKGU2a REF0 DIE3 3\.5e-12/)
-  assert.match(unlisted.source, /CPKGU3a REF1 DIE3 4\.95e-11/)
-  assert.match(unlisted.source, /VDIE2 DIE2 0 1\.5/)
-  assert.match(unlisted.source, /VDIE3 DIE3 0 0/)
+  assert.match(unlisted.source, /CPKGU2 REF0 REF1 7e-12/)
+  assert.doesNotMatch(unlisted.source, /^CPKGU3 |^VDIE/m)
+  assert.match(unlisted.source, /^XBUF0 PKGD0 PKGUL2 PKGUL3 /m)
   const packageElements = unlisted.source
     .split("\n")
     .filter((line) =>

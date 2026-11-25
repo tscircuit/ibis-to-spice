@@ -1,6 +1,7 @@
-import { lines, sections } from "./ibis-sections"
+import { stripIbisCommentLines, parseIbisSections } from "./ibis-sections"
 import { IbisError } from "./parse-ibis"
 import { parseMatrix } from "./package-matrix-syntax"
+import { checkIbisMutualTerms } from "./validate-package-matrices"
 
 /** IBIS maximum length for a package name, manufacturer, or OEM. */
 const PACKAGE_NAME_LIMIT = 40
@@ -8,11 +9,11 @@ const PACKAGE_NAME_LIMIT = 40
 const DESCRIPTION_LIMIT = 59
 /** IBIS maximum length for a physical pin name. */
 const PACKAGE_PIN_LIMIT = 5
-const MATRIX_FIELDS = new Map<string, "R" | "L" | "C">([
-  ["resistance matrix", "R"],
-  ["inductance matrix", "L"],
-  ["capacitance matrix", "C"],
-] as const)
+const MATRIX_FIELDS = {
+  "resistance matrix": "R",
+  "inductance matrix": "L",
+  "capacitance matrix": "C",
+} as const
 
 export type Matrix = number[][]
 
@@ -42,8 +43,8 @@ export function parsePackageModel({
 }): PackageModel {
   if (!name || name.length > PACKAGE_NAME_LIMIT)
     throw new IbisError("invalid_package", `${name}: invalid package name`)
-  const [header, ...body] = sections(block)
-  if (lines(header.body).length) {
+  const [header, ...body] = parseIbisSections(block)
+  if (stripIbisCommentLines(header.body).length) {
     throw new IbisError(
       "invalid_package",
       `${name}: data before package metadata`,
@@ -55,7 +56,12 @@ export function parsePackageModel({
       "invalid_package",
       `${name}: missing [End Package Model]`,
     )
-  if (body[end].argument)
+  const followingSection = body[end + 1]
+  if (
+    body[end].argument ||
+    stripIbisCommentLines(body[end].body).length ||
+    (followingSection && followingSection.key !== "external circuit")
+  )
     throw new IbisError(
       "invalid_package",
       `${name}: unexpected data after [End Package Model]`,
@@ -63,10 +69,14 @@ export function parsePackageModel({
   const dataSections = body
     .slice(0, end)
     .filter(({ key }) => key !== "comment char")
-    .map(({ key, argument, body }) => ({ key, argument, lines: lines(body) }))
+    .map(({ key, argument, body }) => ({
+      key,
+      argument,
+      lines: stripIbisCommentLines(body),
+    }))
   const metadata: Record<string, string> = {}
   const pins: string[] = []
-  const mergedPins: Record<string, string> = {}
+  const mergedPins: Record<string, string> = Object.create(null)
   const matrices: Partial<Pick<PackageModel, "R" | "L" | "C">> = {}
   let declaredPinCount = 0
   let phase: "metadata" | "pins" | "data" | "end" = "metadata"
@@ -116,30 +126,7 @@ export function parsePackageModel({
           `${name}: [Number Of Pins] must precede [Pin Numbers]`,
         )
       }
-      for (const line of lines) {
-        const pinKey = line.toLowerCase()
-        const hasSectionSyntax =
-          /\s/.test(line) || line.includes("=") || line.includes("/")
-        if (hasSectionSyntax || pinKey === "fork" || pinKey === "endfork") {
-          throw new IbisError(
-            "invalid_package",
-            `${name}: package section syntax is unsupported in [Pin Numbers]`,
-          )
-        }
-        if (line.length > PACKAGE_PIN_LIMIT || pins.includes(line)) {
-          throw new IbisError(
-            "invalid_package",
-            `${name}: invalid or duplicate package pin ${line}`,
-          )
-        }
-        pins.push(line)
-      }
-      if (pins.length !== declaredPinCount) {
-        throw new IbisError(
-          "invalid_package",
-          `${name}: package pin count ${pins.length} differs from [Number Of Pins] ${declaredPinCount}`,
-        )
-      }
+      pins.push(...parsePackagePinNumbers({ lines, declaredPinCount, name }))
       phase = "pins"
       continue
     }
@@ -174,7 +161,9 @@ export function parsePackageModel({
       phase = "end"
       continue
     }
-    const field = MATRIX_FIELDS.get(key)
+    const field = Object.hasOwn(MATRIX_FIELDS, key)
+      ? MATRIX_FIELDS[key as keyof typeof MATRIX_FIELDS]
+      : undefined
     if (!field || phase !== "data" || matrices[field])
       throw new IbisError(
         "invalid_package",
@@ -207,15 +196,56 @@ export function parsePackageModel({
       "invalid_package",
       `${name}: required inductance/capacitance matrix missing`,
     )
+  const resistance = matrices.R || pins.map(() => pins.map(() => 0))
+  checkIbisMutualTerms({ matrix: resistance, label: `${name} resistance` })
+  checkIbisMutualTerms({ matrix: matrices.L, label: `${name} inductance` })
   return {
     name,
     manufacturer: metadata.manufacturer,
     oem: metadata.oem,
     description: metadata.description,
     pins,
-    R: matrices.R || pins.map(() => pins.map(() => 0)),
+    R: resistance,
     L: matrices.L,
     C: matrices.C,
-    mergedPins,
+    mergedPins: { ...mergedPins },
   }
+}
+
+/** Read pin names in the order used by all three matrices. */
+function parsePackagePinNumbers({
+  lines,
+  declaredPinCount,
+  name,
+}: {
+  lines: string[]
+  declaredPinCount: number
+  name: PackageModel["name"]
+}): PackageModel["pins"] {
+  const pins: PackageModel["pins"] = []
+  for (const line of lines) {
+    const pinKey = line.toLowerCase()
+    const hasSectionSyntax =
+      /\s/.test(line) || line.includes("=") || line.includes("/")
+    if (hasSectionSyntax || pinKey === "fork" || pinKey === "endfork") {
+      throw new IbisError(
+        "invalid_package",
+        `${name}: package section syntax is unsupported in [Pin Numbers]`,
+      )
+    }
+    if (line.length > PACKAGE_PIN_LIMIT || pins.includes(line)) {
+      throw new IbisError(
+        "invalid_package",
+        `${name}: invalid or duplicate package pin ${line}`,
+      )
+    }
+    pins.push(line)
+  }
+  if (pins.length !== declaredPinCount) {
+    throw new IbisError(
+      "invalid_package",
+      `${name}: package pin count ${pins.length} differs from [Number Of Pins] ${declaredPinCount}`,
+    )
+  }
+  return pins
 }

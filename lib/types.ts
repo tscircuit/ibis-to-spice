@@ -101,6 +101,10 @@ export interface IbisDocument {
   selectors: Record<string, string[]>
   modelNames: string[]
   getBuffer(name: string): IbisBuffer
+  getPackageModel?(name: string): PackageModel
+}
+
+export interface ParsedIbisDocument extends IbisDocument {
   getPackageModel(name: string): PackageModel
 }
 
@@ -224,6 +228,8 @@ export interface IbisConversionMetadata {
   packageData: {
     coupledModel?: string
     matrices?: CoupledPackageModel
+    /** Aliased board ports must be bound to the same net as their canonical port. */
+    boardPortAliases?: Record<string, string>
     unusedPinPolicy?: "open-series-floating-capacitance"
     mappedPins: Array<{
       physicalPin: string

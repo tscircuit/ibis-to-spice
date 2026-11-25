@@ -39,7 +39,7 @@ export interface WaveformTailTruncation {
 }
 
 /** Earliest sample whose entire suffix stays in tolerance; a late excursion resets the window. */
-function settledIndex({
+function findSettledIndex({
   deviations,
   limit,
 }: {
@@ -52,7 +52,7 @@ function settledIndex({
 }
 
 /** Measure a fixture's largest remaining deviation from its final voltage. */
-function fixtureDeviation({
+function measureFixtureDeviation({
   table,
   timeSeconds,
 }: {
@@ -136,7 +136,7 @@ export function findWaveformTailTruncation({
   const deviations = coefficientSamples.map((row) =>
     Math.max(Math.abs(row[1] - pullup), Math.abs(row[2] - pulldown)),
   )
-  const index = settledIndex({ deviations, limit: STEADY_STATE_TOLERANCE })
+  const index = findSettledIndex({ deviations, limit: STEADY_STATE_TOLERANCE })
   if (index === coefficientSamples.length) return undefined
   let timeSeconds = coefficientSamples[index][0]
   const waveforms = buffer.waveforms
@@ -151,7 +151,7 @@ export function findWaveformTailTruncation({
   for (const table of tables) {
     const final = table[table.length - 1][1]
     const limit = STEADY_STATE_TOLERANCE * Math.abs(final - table[0][1])
-    const start = settledIndex({
+    const start = findSettledIndex({
       deviations: table.map((row) => Math.abs(row[1] - final)),
       limit,
     })
@@ -184,7 +184,7 @@ export function findWaveformTailTruncation({
       toleranceVolts:
         STEADY_STATE_TOLERANCE *
         Math.abs(table[table.length - 1][1] - table[0][1]),
-      maxDeviationVolts: fixtureDeviation({
+      maxDeviationVolts: measureFixtureDeviation({
         table,
         timeSeconds: cutoffTimeSeconds,
       }),

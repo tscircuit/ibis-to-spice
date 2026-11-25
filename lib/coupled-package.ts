@@ -3,38 +3,32 @@ import { IbisError } from "./parse-ibis"
 import {
   type ReducedPackageMatrices,
   reducePackageMatrices,
-  sumReferenceCapacitance,
 } from "./reduce-package-matrices"
+import {
+  checkCapacitance,
+  checkPositive,
+  checkSymmetricMatrix,
+  sumReferenceCapacitance,
+} from "./validate-package-matrices"
+import { spiceNumber } from "./convert"
 
 /** A lumped pi section splits shunt capacitance between its two ends. */
 export const PI_SECTION_SHUNT_COUNT = 2
 
-/** [Pin Mapping] roles shared by POWER or GND pins. */
-type PackageRailRole = "pullup" | "powerClamp" | "pulldown" | "groundClamp"
-
-/** Find the bus labels that apply to this package pin's POWER or GND model. */
-function packagePinBuses({
+/** Use the drive bus when declared, with a clamp-only bus as a fallback. */
+function getPackageRailBus({
   component,
-  packagePinName,
+  pinName,
 }: {
   component: IbisComponent
-  packagePinName: string
-}): string[] {
-  const pin = component.pins[packagePinName]
-  const mapping = component.pinMapping[packagePinName]
-  if (!pin || !mapping) return []
-  const pinModelName = pin.model.toLowerCase()
-  let roles: PackageRailRole[] = []
-  if (pinModelName === "power") roles = ["pullup", "powerClamp"]
-  if (pinModelName === "gnd") roles = ["pulldown", "groundClamp"]
-  return roles.flatMap((role) => {
-    const bus = mapping[role]
-    if (bus === undefined) return []
-    return [bus]
-  })
+  pinName: string
+}): string | undefined {
+  const mapping = component.pinMapping[pinName]
+  const kind = component.pins[pinName]?.model.toLowerCase()
+  if (kind === "power") return mapping?.pullup || mapping?.powerClamp
+  if (kind === "gnd") return mapping?.pulldown || mapping?.groundClamp
 }
 
-/** Merged pins must share both the [Pin] model role and a [Pin Mapping] bus. */
 function sharePackageBus({
   component,
   packagePinName,
@@ -44,12 +38,12 @@ function sharePackageBus({
   packagePinName: string
   matrixPinName: string
 }): boolean {
-  const packagePinModel = component.pins[packagePinName]?.model.toLowerCase()
-  if (packagePinModel !== component.pins[matrixPinName]?.model.toLowerCase())
-    return false
-  const buses = packagePinBuses({ component, packagePinName })
-  return packagePinBuses({ component, packagePinName: matrixPinName }).some(
-    (bus) => buses.includes(bus),
+  const kind = component.pins[packagePinName]?.model.toLowerCase()
+  if (kind !== component.pins[matrixPinName]?.model.toLowerCase()) return false
+  const bus = getPackageRailBus({ component, pinName: packagePinName })
+  return (
+    bus !== undefined &&
+    bus === getPackageRailBus({ component, pinName: matrixPinName })
   )
 }
 
@@ -89,8 +83,13 @@ export function resolveCoupledPackage({
   pins: ReducedPackageMatrices["activePins"]
 }): CoupledPackageModel | undefined {
   if (component.coupledPackage === undefined) return undefined
+  if (!document.getPackageModel)
+    throw new IbisError(
+      "invalid_package",
+      `${component.name}: use a parsed document to resolve the coupled package`,
+    )
   const model = document.getPackageModel(component.coupledPackage)
-  const mergedPins: Record<string, string> = {}
+  const mergedPins: Record<string, string> = Object.create(null)
   for (const [packagePinName, matrixPinName] of Object.entries(
     model.mergedPins || {},
   )) {
@@ -125,7 +124,10 @@ export function resolveCoupledPackage({
         .filter((pin) => model.pins.includes(pin)),
     ),
   ]
-  return { ...reducePackageMatrices({ model, pins: activePins }), mergedPins }
+  return {
+    ...reducePackageMatrices({ model, pins: activePins }),
+    mergedPins: { ...mergedPins },
+  }
 }
 
 /** Report exact [Pin] self-term differences without substituting scalar package values. */
@@ -155,61 +157,128 @@ export function comparePinPackageTerms({
   return differences
 }
 
-/**
- * Board-to-die currents define the signs of R and mutual L. Self resistors plus
- * CCVS terms realize the entire R matrix; signed K realizes L. Maxwell C is split
- * equally at board/die ends as one lumped pi section, relative to ideal die ground.
- */
+/** Stamp a passive lumped pi model; currents and mutual R/L face board to die. */
 export function buildCoupledPackageSpiceElements({
   matrices,
   terminals,
   die,
   ground,
+  boardGround = ground,
 }: {
   matrices: Pick<ReducedPackageMatrices, "R" | "L" | "C">
   terminals: string[]
   die: string[]
   ground: string
+  boardGround?: string
 }): string[] {
+  if (
+    die.length !== terminals.length ||
+    Array.from(die).some((node) => !node) ||
+    Array.from(terminals).some((node) => !node) ||
+    !ground ||
+    !boardGround
+  )
+    throw new IbisError(
+      "invalid_package",
+      "Package matrix requires one board and die node per pin and a ground reference",
+    )
+  for (const field of ["R", "L", "C"] as const)
+    checkSymmetricMatrix({
+      matrix: matrices[field],
+      size: terminals.length,
+      label: field,
+    })
+  checkPositive({
+    matrix: matrices.R,
+    label: "Package resistance for SPICE",
+    requireIndependentLeads: true,
+  })
+  checkPositive({
+    matrix: matrices.L,
+    label: "Package inductance for SPICE",
+    requireIndependentLeads: true,
+  })
+  checkCapacitance({
+    matrix: matrices.C,
+    label: "Package capacitance for SPICE",
+  })
+
+  const { R, L, C } = matrices
   const elements: string[] = []
-  for (let i = 0; i < terminals.length; i++) {
-    let node = `PKGS${i}`
-    elements.push(`VPKGS${i} ${terminals[i]} ${node} 0`)
-    if (matrices.R[i][i] > 0) {
-      elements.push(`RPKG${i} ${node} PKGR${i} ${matrices.R[i][i]}`)
-      node = `PKGR${i}`
-    }
-    for (let j = 0; j < terminals.length; j++) {
-      if (i === j || matrices.R[i][j] === 0) continue
-      const next = `PKGR${i}_${j}`
-      elements.push(
-        `HPKG${i}_${j} ${node} ${next} VPKGS${j} ${matrices.R[i][j]}`,
-      )
-      node = next
-    }
-    elements.push(`LPKG${i} ${node} ${die[i]} ${matrices.L[i][i]}`)
-    const shuntCapacitanceFarads = sumReferenceCapacitance(matrices.C[i])
-    if (shuntCapacitanceFarads > 0) {
-      const halfShuntCapacitanceFarads =
-        shuntCapacitanceFarads / PI_SECTION_SHUNT_COUNT
-      elements.push(
-        `CPKG${i}a ${terminals[i]} ${ground} ${halfShuntCapacitanceFarads}`,
-        `CPKG${i}b ${die[i]} ${ground} ${halfShuntCapacitanceFarads}`,
-      )
+  for (const [i, terminal] of terminals.entries()) {
+    elements.push(
+      ...stampSeriesLead({ R, L, index: i, terminal, dieNode: die[i] }),
+    )
+    const shunt = sumReferenceCapacitance(C[i]) / PI_SECTION_SHUNT_COUNT
+    if (shunt > 0) {
+      if (terminal !== boardGround)
+        elements.push(
+          `CPKG${i}a ${terminal} ${boardGround} ${spiceNumber(shunt)}`,
+        )
+      if (die[i] !== ground)
+        elements.push(`CPKG${i}b ${die[i]} ${ground} ${spiceNumber(shunt)}`)
     }
     for (let j = i + 1; j < terminals.length; j++) {
-      const coupling =
-        matrices.L[i][j] / Math.sqrt(matrices.L[i][i] * matrices.L[j][j])
-      if (coupling !== 0)
-        elements.push(`KPKG${i}_${j} LPKG${i} LPKG${j} ${coupling}`)
-      const halfMutualCapacitanceFarads =
-        -matrices.C[i][j] / PI_SECTION_SHUNT_COUNT
-      if (!(halfMutualCapacitanceFarads > 0)) continue
-      elements.push(
-        `CPKG${i}_${j}a ${terminals[i]} ${terminals[j]} ${halfMutualCapacitanceFarads}`,
-        `CPKG${i}_${j}b ${die[i]} ${die[j]} ${halfMutualCapacitanceFarads}`,
-      )
+      if (L[i][j] !== 0) {
+        const coupling = L[i][j] / Math.sqrt(L[i][i]) / Math.sqrt(L[j][j])
+        elements.push(
+          `KPKG${i}_${j} LPKG${i} LPKG${j} ${spiceNumber(coupling)}`,
+        )
+      }
+      const mutual = -C[i][j] / PI_SECTION_SHUNT_COUNT
+      if (mutual === 0) continue
+      if (terminal !== terminals[j])
+        elements.push(
+          `CPKG${i}_${j}a ${terminal} ${terminals[j]} ${spiceNumber(mutual)}`,
+        )
+      if (die[i] !== die[j])
+        elements.push(
+          `CPKG${i}_${j}b ${die[i]} ${die[j]} ${spiceNumber(mutual)}`,
+        )
     }
   }
+  return elements
+}
+
+function stampSeriesLead({
+  R,
+  L,
+  index,
+  terminal,
+  dieNode,
+}: {
+  R: ReducedPackageMatrices["R"]
+  L: ReducedPackageMatrices["L"]
+  index: number
+  terminal: string
+  dieNode: string
+}): string[] {
+  const resistance = R[index][index]
+  const inductance = L[index][index]
+  if (resistance === 0 && inductance === 0) {
+    if (terminal === dieNode) return []
+    return [`VPKGS${index} ${terminal} ${dieNode} 0`]
+  }
+  let node = `PKGS${index}`
+  const elements = [`VPKGS${index} ${terminal} ${node} 0`]
+  const mutual = R[index].flatMap((entry, j) =>
+    j !== index && entry !== 0 ? [j] : [],
+  )
+  if (resistance > 0) {
+    const next =
+      inductance === 0 && mutual.length === 0 ? dieNode : `PKGR${index}`
+    elements.push(`RPKG${index} ${node} ${next} ${spiceNumber(resistance)}`)
+    node = next
+  }
+  for (const [position, j] of mutual.entries()) {
+    const isLast = position === mutual.length - 1
+    const next = inductance === 0 && isLast ? dieNode : `PKGR${index}_${j}`
+    elements.push(
+      `HPKG${index}_${j} ${node} ${next} VPKGS${j} ${spiceNumber(R[index][j])}`,
+    )
+    node = next
+  }
+  if (inductance > 0)
+    elements.push(`LPKG${index} ${node} ${dieNode} ${spiceNumber(inductance)}`)
   return elements
 }

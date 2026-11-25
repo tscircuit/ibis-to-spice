@@ -1,6 +1,11 @@
 import { test } from "bun:test"
 import assert from "node:assert/strict"
-import { interpolate, parseIbis, switchingWeights } from "../../lib"
+import {
+  interpolate,
+  parseIbis,
+  spiceNumber,
+  switchingWeights,
+} from "../../lib"
 
 import {
   convert,
@@ -38,10 +43,15 @@ test("holds coefficients across measured edges", () => {
       `${label} has no stitch interval finer than the IBIS table`,
     )
     const edge = column.findIndex((row) => Math.abs(row[0] - 1.25e-9) < 1e-18)
+    const coefficient = label === "KU" ? 1 : 2
+    const measured = table.map((sample): [number, number] => [
+      sample[0],
+      sample[coefficient],
+    ])
     assert.equal(
       column[edge][1],
-      column[edge - 1][1],
-      `${label} falling edge starts from the held coefficient`,
+      Number(spiceNumber(interpolate(measured, 1.25e-9))),
+      `${label} shares the interpolated end of the preceding edge`,
     )
   }
   const repeated = convert({

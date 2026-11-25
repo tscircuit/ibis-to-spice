@@ -1,191 +1,259 @@
+import { spiceNumber } from "./convert"
 import { IbisError } from "./parse-ibis"
-import type { IbisComponent, IbisConversionMetadata } from "./types"
+import type { IbisConversionMetadata } from "./types"
 import {
   buildCoupledPackageSpiceElements,
   type CoupledPackageModel,
-  PI_SECTION_SHUNT_COUNT,
 } from "./coupled-package"
 import {
-  buildPackageBranch,
+  buildScalarPackageBranch,
+  requireScalarPackageTerms,
   type PackageBranch,
   type PinPackageTerms,
 } from "./package-branch"
-import {
-  DIE_VOLTAGE_TOLERANCE_VOLTS,
-  type resolveRailReferences,
-} from "./package-rails"
+import { resolvePackageGroundPorts, type PackagePort } from "./package-rails"
 
-/** Physical pin label from the component [Pin] table. */
-type PackagePinName = keyof IbisComponent["pins"]
+type PackagePinName = PinPackageTerms["physicalPin"]
 
-/** Circuit JSON port and physical pin corresponding to a SPICE wrapper terminal. */
-export interface PackageTerminal {
+interface PackageTerminal {
   boardSpiceNode: string
-  port: string
-  packagePinName?: PackagePinName
+  port: PackagePort
+  index: number
   terms?: PinPackageTerms
 }
 
-/** Package branches and the node remapping for die buffers. */
 interface PackageNetwork {
-  branches: Map<PackagePinName, PackageBranch>
-  dieSpiceNodes: Map<string, string>
+  dieSpiceNodes: Map<PackagePort, string>
   elements: string[]
+  boardPortAliases: Record<PackagePort, PackagePort>
 }
 
-/** Resolve wrapper terminals independently of physical package pins. */
+/** Keep every mapped physical lead even when several share one local port. */
 export function resolvePackageTerminals(
-  mapping: Record<string, string>,
-  mappedPins: IbisConversionMetadata["packageData"]["mappedPins"],
+  mapping: Record<string, PackagePort>,
+  mappedPins: PinPackageTerms[],
 ): PackageTerminal[] {
-  return Object.entries(mapping).map(([boardSpiceNode, port]) => {
-    const terms = mappedPins.find((pin) => pin.port === port)
-    return {
-      boardSpiceNode,
-      port,
-      packagePinName: terms?.physicalPin,
-      terms,
-    }
+  return Object.entries(mapping).flatMap(([boardSpiceNode, port], index) => {
+    const terminal = { boardSpiceNode, port, index }
+    const matches = mappedPins.filter((pin) => pin.port === port)
+    return matches.length
+      ? matches.map((terms) => ({ ...terminal, terms }))
+      : [terminal]
   })
 }
 
-/** Pick one external terminal for each package branch, prioritizing its matrix pin. */
-export function buildPackageNetwork({
+/**
+ * IBIS §7 [Merged Pins] shorts the board terminals. Expose a single terminal and
+ * report aliases so a board binder can require all aliased ports on the same net.
+ */
+function resolveBoardPortAliases({
   terminals,
   coupled,
-  component,
-  references,
 }: {
   terminals: PackageTerminal[]
   coupled?: CoupledPackageModel
-  component: IbisComponent
-  references: ReturnType<typeof resolveRailReferences>
-}): PackageNetwork {
-  const branches = new Map<PackagePinName, PackageBranch>()
-  const dieSpiceNodes = new Map<string, string>()
-  const elements: string[] = []
-  const mergedVoltages = new Map<PackagePinName, number>()
-  for (const [index, terminal] of terminals.entries()) {
-    const { packagePinName, port, boardSpiceNode } = terminal
-    if (packagePinName === undefined) {
-      dieSpiceNodes.set(port, boardSpiceNode)
-      continue
-    }
-    const matrixPinName = coupled?.mergedPins[packagePinName] || packagePinName
-    const railVoltageVolts = references.get(port)?.voltageVolts
-    const previous = mergedVoltages.get(matrixPinName)
-    if (railVoltageVolts !== undefined) {
-      if (
-        previous !== undefined &&
-        Math.abs(previous - railVoltageVolts) > DIE_VOLTAGE_TOLERANCE_VOLTS
-      )
-        throw new IbisError(
-          "invalid_package",
-          `${component.name}: incompatible die voltages on merged package pin ${matrixPinName}`,
-        )
-      mergedVoltages.set(matrixPinName, railVoltageVolts)
-    }
-    if (branches.has(matrixPinName)) continue
-    const canonicalTerminal = terminals.find(
-      (entry) => entry.packagePinName === matrixPinName,
-    )
-    const branch = buildPackageBranch({
-      terminal: canonicalTerminal?.boardSpiceNode || boardSpiceNode,
-      packagePinName: canonicalTerminal?.packagePinName || packagePinName,
-      index,
-      matrixPinName,
-      terms: canonicalTerminal?.terms || terminal.terms,
-      coupled,
-      railVoltageVolts,
-    })
-    branches.set(matrixPinName, branch)
-    elements.push(...branch.elements)
+}): Record<PackagePort, PackagePort> {
+  const representatives = new Map<PackagePinName, PackagePort>()
+  const aliases: Record<PackagePort, PackagePort> = Object.create(null)
+  if (!coupled) return aliases
+  for (const { port, terms } of terminals) {
+    if (terms && coupled.activePins.includes(terms.physicalPin))
+      representatives.set(terms.physicalPin, port)
   }
-  for (const { port, packagePinName } of terminals) {
-    if (packagePinName === undefined) continue
-    const branch = branches.get(
-      coupled?.mergedPins[packagePinName] || packagePinName,
-    )
-    if (!branch)
-      throw new IbisError(
-        "invalid_package",
-        `${packagePinName}: missing package branch`,
-      )
-    dieSpiceNodes.set(port, branch.dieSpiceNode)
+  for (const { port, terms } of terminals) {
+    if (!terms) continue
+    const representative = coupled.mergedPins[terms.physicalPin]
+    if (representative === undefined) continue
+    const canonical = representatives.get(representative) || port
+    representatives.set(representative, canonical)
+    const oldRoot = getCanonicalPort({ aliases, port })
+    const newRoot = getCanonicalPort({ aliases, port: canonical })
+    if (oldRoot !== newRoot) aliases[oldRoot] = newRoot
   }
-  return { branches, dieSpiceNodes, elements }
+  return Object.fromEntries(
+    Object.keys(aliases).map((port) => [
+      port,
+      getCanonicalPort({ aliases, port }),
+    ]),
+  )
 }
 
-/** Obtain a shared pulldown node when one exists. The matrix reference is global for multiple banks. */
-function resolveCapacitanceGround(
-  groundSpiceNodes: Array<string | undefined>,
-): string {
-  const nodes = new Set(groundSpiceNodes)
-  const [groundSpiceNode] = nodes
-  if (nodes.size === 1 && groundSpiceNode !== undefined) return groundSpiceNode
+function getCanonicalPort({
+  aliases,
+  port,
+}: {
+  aliases: Record<PackagePort, PackagePort>
+  port: PackagePort
+}): PackagePort {
+  let root = port
+  while (Object.hasOwn(aliases, root)) root = aliases[root]
+  return root
+}
+
+/** Use a common reference node when available. A multi-bank matrix uses SPICE ground. */
+function resolveCapacitanceGround(nodes: Iterable<string | undefined>): string {
+  const unique = new Set(nodes)
+  if (unique.size === 1) return [...unique][0] || "0"
   return "0"
 }
 
-/** Attach the matrix and pin-level shunts to their electrical reference. */
-export function buildPackageCapacitances({
+/** Build a board-powered network, sharing die endpoints for leads on the same local rail. */
+export function buildPackageNetwork({
   terminals,
-  network,
-  pins,
   coupled,
-  railReferences,
+  pins,
 }: {
   terminals: PackageTerminal[]
-  network: PackageNetwork
-  pins: IbisConversionMetadata["pins"]
   coupled?: CoupledPackageModel
-  railReferences: ReturnType<typeof resolveRailReferences>
-}): string[] {
-  const { dieSpiceNodes, branches } = network
-  const ground = resolveCapacitanceGround(
-    pins.map((pin) => dieSpiceNodes.get(pin.references.pulldown)),
-  )
-  const elements: string[] = []
-  for (const [index, { packagePinName, port }] of terminals.entries()) {
-    if (packagePinName === undefined) continue
-    const branch = branches.get(packagePinName)
-    if (!branch || branch.capacitanceFarads === 0) continue
-    const signalPin = pins.find((pin) => pin.port === port)
-    const pulldownPorts = railReferences.get(port)?.pulldownPorts
-    let reference = ground
-    if (signalPin)
-      reference = resolveCapacitanceGround([
-        dieSpiceNodes.get(signalPin.references.pulldown),
-      ])
-    if (pulldownPorts)
-      reference = resolveCapacitanceGround(
-        [...pulldownPorts].map((id) => dieSpiceNodes.get(id)),
-      )
-    let prefix = "CPKG"
-    if (coupled) prefix = "CPKGU"
-    const halfCapacitanceFarads =
-      branch.capacitanceFarads / PI_SECTION_SHUNT_COUNT
-    elements.push(
-      `${prefix}${index}a ${branch.boardSpiceNode} ${reference} ${halfCapacitanceFarads}`,
-      `${prefix}${index}b ${branch.seriesEndSpiceNode} ${reference} ${halfCapacitanceFarads}`,
-    )
+  pins: IbisConversionMetadata["pins"]
+}): PackageNetwork {
+  const boardPortAliases = resolveBoardPortAliases({ terminals, coupled })
+  const boardNodes = new Map<PackagePort, string>()
+  const terminalsByPort = new Map<PackagePort, PackageTerminal[]>()
+  for (const terminal of terminals) {
+    const port = getCanonicalPort({
+      aliases: boardPortAliases,
+      port: terminal.port,
+    })
+    const group = terminalsByPort.get(port)
+    if (group) group.push(terminal)
+    else terminalsByPort.set(port, [terminal])
+    if (port === terminal.port) boardNodes.set(port, terminal.boardSpiceNode)
   }
-  if (!coupled) return elements
-  const matrixBranches = coupled.activePins.map((pin) => {
-    const branch = branches.get(pin)
-    if (!branch)
+
+  for (const [alias, canonical] of Object.entries(boardPortAliases)) {
+    const node = boardNodes.get(canonical)
+    if (node !== undefined) boardNodes.set(alias, node)
+  }
+  const elements: string[] = []
+  const dieSpiceNodes = new Map<PackagePort, string>()
+  const matrixBranches = new Map<PackagePinName, PackageBranch>()
+  const shunts: Array<{
+    index: number
+    port: PackagePort
+    node: string
+    farads: number
+  }> = []
+  let nextIndex = terminals.reduce(
+    (count, entry) => Math.max(count, entry.index + 1),
+    0,
+  )
+  for (const [port, group] of terminalsByPort) {
+    const boardSpiceNode = boardNodes.get(port)
+    if (boardSpiceNode === undefined)
       throw new IbisError(
         "invalid_package",
-        `${pin}: missing package matrix branch`,
+        `${port}: missing canonical board terminal`,
       )
-    return branch
-  })
-  return [
-    ...elements,
-    ...buildCoupledPackageSpiceElements({
-      matrices: coupled,
-      terminals: matrixBranches.map((branch) => branch.boardSpiceNode),
-      die: matrixBranches.map((branch) => branch.seriesEndSpiceNode),
-      ground,
-    }),
-  ]
+    const leads = group.flatMap(({ terms }) => {
+      if (!terms) return []
+      const name = coupled?.mergedPins[terms.physicalPin] || terms.physicalPin
+      if (coupled?.activePins.includes(name)) {
+        return [{ name, terms, matrixIndex: coupled.activePins.indexOf(name) }]
+      }
+      return [{ name, terms, matrixIndex: -1 }]
+    })
+    const uniqueLeads = [
+      ...new Map(leads.map((lead) => [lead.name, lead])).values(),
+    ]
+    const branches = uniqueLeads.map(
+      ({ name, terms, matrixIndex }, position) => {
+        const index = position === 0 ? group[0].index : nextIndex++
+        if (coupled && matrixIndex >= 0)
+          return {
+            name,
+            matrixIndex,
+            index,
+            terms: {
+              resistanceOhms: coupled.R[matrixIndex][matrixIndex],
+              inductanceHenries: coupled.L[matrixIndex][matrixIndex],
+              capacitanceFarads: 0,
+            },
+          }
+        return {
+          name,
+          matrixIndex,
+          index,
+          terms: requireScalarPackageTerms(terms),
+        }
+      },
+    )
+    const lossless = branches.some(
+      ({ terms }) =>
+        terms.resistanceOhms === 0 && terms.inductanceHenries === 0,
+    )
+    const first = branches[0]
+    let sharedDieNode: string | undefined
+    if (lossless) sharedDieNode = boardSpiceNode
+    else if (first && first.matrixIndex >= 0)
+      sharedDieNode = `PKGD${first.matrixIndex}`
+    else if (branches.length > 1) sharedDieNode = `PKGB${first.index}`
+
+    let dieNode = sharedDieNode || boardSpiceNode
+    for (const { name, terms, matrixIndex, index } of branches) {
+      if (matrixIndex >= 0) {
+        matrixBranches.set(name, {
+          boardSpiceNode,
+          dieSpiceNode: dieNode,
+          elements: [],
+        })
+        continue
+      }
+      const branch = buildScalarPackageBranch({
+        boardSpiceNode,
+        dieSpiceNode: sharedDieNode,
+        index,
+        prefix: coupled ? "PKGU" : "PKG",
+        terms,
+      })
+      dieNode = branch.dieSpiceNode
+      elements.push(...branch.elements)
+      if (terms.capacitanceFarads > 0)
+        shunts.push({
+          index,
+          port,
+          node: boardSpiceNode,
+          farads: terms.capacitanceFarads,
+        })
+    }
+    for (const terminal of group) dieSpiceNodes.set(terminal.port, dieNode)
+  }
+
+  const groundPorts = resolvePackageGroundPorts(pins)
+  const prefix = coupled ? "CPKGU" : "CPKG"
+  for (const { index, port, node, farads } of shunts) {
+    const ground = resolveCapacitanceGround(
+      [...(groundPorts.get(port) || [])].map((port) => boardNodes.get(port)),
+    )
+    if (node !== ground)
+      elements.push(
+        `${prefix}${index} ${node} ${ground} ${spiceNumber(farads)}`,
+      )
+  }
+  if (coupled) {
+    const matrix = coupled.activePins.map((pin) => {
+      const branch = matrixBranches.get(pin)
+      if (!branch)
+        throw new IbisError(
+          "invalid_package",
+          `${pin}: missing package matrix branch`,
+        )
+      return branch
+    })
+    const grounds = pins.map((pin) => pin.references.pulldown)
+    elements.push(
+      ...buildCoupledPackageSpiceElements({
+        matrices: coupled,
+        terminals: matrix.map((branch) => branch.boardSpiceNode),
+        die: matrix.map((branch) => branch.dieSpiceNode),
+        ground: resolveCapacitanceGround(
+          grounds.map((port) => dieSpiceNodes.get(port)),
+        ),
+        boardGround: resolveCapacitanceGround(
+          grounds.map((port) => boardNodes.get(port)),
+        ),
+      }),
+    )
+  }
+  return { dieSpiceNodes, elements, boardPortAliases }
 }

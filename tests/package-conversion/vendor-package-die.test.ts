@@ -70,14 +70,15 @@ test("scalar vendor packages preserve the die buffer and switching controls", ()
 		const terminals = Object.keys(packaged.spicePinMapping);
 		const packagedLines = [...packaged.source.matchAll(dieLines)].map(
 			([line]) =>
-				line.replace(
-					/\b(?:PKGL|DIE)(\d+)\b/g,
-					(_, index) => terminals[Number(index)],
-				),
+				line
+					.replace(/\bPKGL(\d+)\b/g, (_, index) => terminals[Number(index)])
+					.replace(/IBIS_[a-f0-9]+_BUF/g, "BUFFER"),
 		);
 		assert.deepEqual(
 			packagedLines,
-			[...die.source.matchAll(dieLines)].map(([line]) => line),
+			[...die.source.matchAll(dieLines)].map(([line]) =>
+				line.replace(/IBIS_[a-f0-9]+_BUF/g, "BUFFER"),
+			),
 		);
 	}
 });

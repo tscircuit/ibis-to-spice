@@ -3,7 +3,7 @@ export interface Section {
   argument: string
   body: string
 }
-export function sections(text: string): Section[] {
+export function parseIbisSections(text: string): Section[] {
   const headers = [
     ...text.matchAll(/^[ \t]*\[([^\]\r\n]+)\][ \t]*([^\r\n]*)/gm),
   ]
@@ -19,7 +19,7 @@ export function sections(text: string): Section[] {
     ),
   }))
 }
-export function lines(body: string): string[] {
+export function stripIbisCommentLines(body: string): string[] {
   return body
     .split(/\r?\n/)
     .map((line) => line.split("|")[0].trim())
